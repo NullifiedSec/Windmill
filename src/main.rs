@@ -1,9 +1,10 @@
+mod download;
 mod lyrics;
+mod player;
 mod store;
-use std::{
-    env, error::Error, fs, io::Write, net::TcpStream, path::PathBuf, process::Command,
-    time::Duration,
-};
+mod ui;
+mod youtube;
+use std::{env, error::Error, fs, path::PathBuf, process::Command};
 use store::Store;
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -18,7 +19,8 @@ fn data_dir() -> Result<PathBuf> {
 }
 fn usage() {
     println!(
-        "Windmill 0.1.0 — local-first media center\n\
+        "Windmill 0.2.0 — local-first media center\n\
+    ui | tui                  # launch terminal media center (default)\n\
     add <path-or-url> <title> <creator>\n\
     list | tag <id> <tag> | untag <id> <tag>\n\
     collection create <name> | collection add <name> <id> | collection show <name>\n\
@@ -35,58 +37,18 @@ fn command(program: &str, args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
-fn mpd_request(lines: &[&str]) -> Result<String> {
-    use std::io::{BufRead, BufReader};
-    let host = env::var("WINDMILL_MPD_ADDR").unwrap_or_else(|_| "127.0.0.1:6600".into());
-    let mut stream = TcpStream::connect(&host)?;
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut greeting = String::new();
-    reader.read_line(&mut greeting)?;
-    if !greeting.starts_with("OK MPD ") {
-        return Err("invalid MPD greeting".into());
-    }
-    let mut output = String::new();
-    for line in lines {
-        if line.contains(['\n', '\r']) {
-            return Err("invalid MPD command".into());
-        }
-        stream.write_all(line.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()?;
-        loop {
-            let mut response = String::new();
-            if reader.read_line(&mut response)? == 0 {
-                return Err("MPD closed connection".into());
-            }
-            if response.starts_with("ACK ") {
-                return Err(format!("MPD: {response}").into());
-            }
-            if response == "OK\n" {
-                break;
-            }
-            output.push_str(&response);
-        }
-    }
-    Ok(output)
-}
-fn mpd_quote(s: &str) -> String {
-    let q = char::from_u32(34).unwrap();
-    let slash = char::from_u32(92).unwrap();
-    let escaped = s
-        .replace(slash, &format!("{slash}{slash}"))
-        .replace(q, &format!("{slash}{q}"));
-    format!("{q}{escaped}{q}")
-}
 fn run() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || args[0] == "help" || args[0] == "--help" {
+    if args.first().is_some_and(|s| s == "help" || s == "--help") {
         usage();
         return Ok(());
     }
     let dir = data_dir()?;
     fs::create_dir_all(&dir)?;
     let store = Store::open(&dir.join("library.db"))?;
+    if args.is_empty() || matches!(args[0].as_str(), "ui" | "tui") {
+        return ui::run(store);
+    }
     match args
         .iter()
         .map(String::as_str)
@@ -123,33 +85,31 @@ fn run() -> Result<()> {
         }
         ["play", id] => {
             let media = store.get(id.parse()?)?;
-            command("mpv", &[&media.source])?;
+            let offline = store
+                .asset(media.id, "video")?
+                .filter(|p| std::path::Path::new(p).is_file())
+                .or(store
+                    .asset(media.id, "audio")?
+                    .filter(|p| std::path::Path::new(p).is_file()));
+            let source = offline.as_deref().unwrap_or(&media.source);
+            command("mpv", &["--", source])?;
         }
         ["download", id, kind @ ("audio" | "video")] => {
             let media = store.get(id.parse()?)?;
-            if !media.source.starts_with("https://") && !media.source.starts_with("http://") {
-                return Err("download requires an HTTP(S) media source".into());
-            }
-            let downloads = dir.join("downloads");
-            fs::create_dir_all(&downloads)?;
-            let template = downloads.join(format!("{}-%(title).150B-%(id)s.%(ext)s", media.id));
-            let output = template.to_str().ok_or("non-UTF8 download path")?;
-            if *kind == "audio" {
-                command(
-                    "yt-dlp",
-                    &[
-                        "--no-playlist",
-                        "-x",
-                        "--audio-format",
-                        "best",
-                        "-o",
-                        output,
-                        &media.source,
-                    ],
-                )?;
+            let kind = if *kind == "audio" {
+                download::Kind::Audio
             } else {
-                command("yt-dlp", &["--no-playlist", "-o", output, &media.source])?;
-            }
+                download::Kind::Video
+            };
+            let file = download::fetch(media.id, &media.source, kind, &dir)
+                .map_err(|e| format!("download: {e}"))?;
+            store.save_asset(media.id, kind.as_str(), &file)?;
+            println!(
+                "Saved local {} asset for #{}: {}",
+                kind.as_str(),
+                media.id,
+                file.display()
+            );
         }
         ["lyrics", path, elapsed] => {
             let text = fs::read_to_string(path)?;
@@ -167,10 +127,13 @@ fn run() -> Result<()> {
                 );
             }
         }
-        ["mpd", "status"] => println!("{}", mpd_request(&["status"])?),
+        ["mpd", "status"] => println!("{}", player::mpd_request(&["status"])?),
         ["mpd", "play", uri] => {
-            let quoted = mpd_quote(uri);
-            println!("{}", mpd_request(&[&format!("add {quoted}"), "play"])?);
+            let quoted = player::mpd_quote(uri);
+            println!(
+                "{}",
+                player::mpd_request(&[&format!("add {quoted}"), "play"])?
+            );
         }
         _ => {
             usage();
@@ -183,17 +146,5 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("windmill: {e}");
         std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::mpd_quote;
-    #[test]
-    fn mpd_argument_escaping() {
-        let q = char::from_u32(34).unwrap();
-        let slash = char::from_u32(92).unwrap();
-        let input = format!("a{q}b");
-        assert_eq!(mpd_quote(&input), format!("{q}a{slash}{q}b{q}"));
     }
 }

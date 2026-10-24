@@ -1,38 +1,83 @@
 # Windmill
 
-A local-first personal media center. Audio playback is delegated to MPD; video playback to mpv. YouTube discovery and downloading use external tools. Windmill owns flexible collections, tags, ranking, and history.
+**Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Status
-First vertical slice: a working **CLI**, not yet a TUI. Local catalog, tags, collections, deterministic tag-based recommendations, yt-dlp downloads, mpv playback and MPD control via native TCP are implemented. Music browsing and synced-lyrics UI come later.
+## Current status: v0.2.0 — first interactive slice
 
-## Development
-Install Rust and Cargo, then `cargo test` and `cargo run -- help`. On this workstation a project-local toolchain is in `.tools/` (gitignored).
+The Rust terminal interface has five working views:
 
-## Commands
-```sh
-windmill add /path/to/song.flac "Feel Good Inc." "Gorillaz"
-windmill add https://www.youtube.com/watch?v=... "Video" "Channel"
+- **Library:** saved media, source information, offline availability, user tags.
+- **Discover:** public YouTube search through yt-dlp, performed in a worker thread.
+- **Collections:** any media entry can belong to arbitrarily many user-named collections.
+- **For You:** transparent tag-matching ranks, plus editable tag filters.
+- **Now Playing:** MPD status, mpv IPC playback position, synchronized local .lrc sidecars.
+
+The CLI and TUI support user-initiated offline audio/video downloads. Downloaded files are linked to their original media entry as assets instead of duplicating it.
+
+**Not finished:** no dedicated YouTube Music browsing backend, rich cover art, online lyrics fetching, word-level karaoke, unified queue, or persistent download-progress dashboard. Actual downloading and audible playback still need end-to-end testing.
+
+## Run on the development workstation
+
+~~~sh
+cd ~/Documents/windmill
+./scripts/dev
+~~~
+
+Or with Rust/Cargo on PATH:
+
+~~~sh
+cargo run --locked
+~~~
+
+The TUI starts by default and requires a real terminal. For the CLI run `windmill help⟧.
+
+## Controls
+
+| Key | Action |
+|---|---|
+| `1⟧–`5⟧, `Tab⟧, `Shift+Tab⟧ | Switch between five views |
+| `j⟧ / `k⟧, arrows | Navigate |
+| `/⟧ | Search public YouTube |
+| `p⟧ | Play using mpv, prefer a downloaded local asset |
+| `m⟧ | Play a local MPD-library file via MPD (Library) |
+| `s⟧ | Save discovered media to catalog |
+| `d⟧ / `v⟧ | Download audio / video for selected online media |
+| `t⟧ | Tag a library item |
+| `c⟧ | Create/add to a collection |
+| `f⟧ | Filter For You with comma-separated tags |
+| `Space⟧, `n⟧, `x⟧ | Pause/resume, next, stop |
+| `r⟧ | Reload local catalog |
+| `q⟧ | Quit (also closes mpv launched by Windmill) |
+
+MPD must be running (`systemctl --user start mpd.service⟧). The configured MPD library root is `~/Music⟧. Files outside MPD's music directory remain playable using mpv.
+
+## CLI examples
+
+~~~sh
+windmill add /path/to/file.flac "Song" "Artist"
+windmill add https://www.youtube.com/watch?v=HyHNuVaZJ-k "Feel Good Inc." "Gorillaz"
 windmill list
-windmill tag <id> melancholic
-windmill tag <id> windmill
-windmill collection create "Peaceful songs"
-windmill collection add "Peaceful songs" <id>
-windmill collection show "Peaceful songs"
-windmill recommend windmill,melancholic
-windmill play <id>                 # mpv (video / direct media)
-windmill download <id> audio       # yt-dlp, downloaded into a managed directory
-windmill download <id> video
-windmill lyrics /path/to/lyrics.lrc 90500   # timestamped lyric preview (milliseconds)
-windmill mpd status                # MPD native TCP status, no mpc dependency
-windmill mpd play /path/to/file   # MPD must be installed and configured
-```
+windmill tag 1 peaceful
+windmill collection create "The Windmill"
+windmill collection add "The Windmill" 1
+windmill collection show "The Windmill"
+windmill recommend peaceful,melancholic
+windmill lyrics /path/to/song.lrc 90500
+windmill mpd status
+windmill download 1 audio
+windmill download 1 video
+~~~
 
-By default the database lives in `$XDG_DATA_HOME/windmill/library.db` or `~/.local/share/windmill/library.db`; downloaded files live alongside it in `downloads/`. Override with `WINDMILL_DATA_DIR` for tests and portability.
+Storage is `~/.local/share/windmill/⟧ (or `$XDG_DATA_HOME/windmill/⟧), including the SQLite database and managed downloads. Set `WINDMILL_DATA_DIR⟧ for isolated profiles and tests.
 
-MPD playback accepts only MPD-library URIs, not arbitrary absolute paths; ensure the audio exists in MPD's music directory. In this initial slice, `mpd play` forwards the supplied URI to MPD and reports errors.
+## Quality checks
 
-No YouTube sign-in is used; online requests and streaming/downloading are not anonymous. Only download media you have the rights to save and comply with applicable provider terms.
+~~~sh
+cargo fmt --all -- --check
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
+~~~
 
-See [architecture](docs/ARCHITECTURE.md), [roadmap](docs/ROADMAP.md) and [local MPD setup](docs/MPD-SETUP.md).
+See [architecture](docs/ARCHITECTURE.md), [roadmap](docs/ROADMAP.md), [user MPD setup](docs/MPD-SETUP.md), and [upstream references](docs/UPSTREAM.md).
 
-Development reference checkouts (ignored by Git) are documented in [upstream sources](docs/UPSTREAM.md).
+No Google login is required for public discovery, but online activity is **not anonymous**. Downloads depend on provider availability and should only be used where permitted. Windmill never scrapes or downloads automatically on import.

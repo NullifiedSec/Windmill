@@ -1,12 +1,9 @@
-# Integration checks
+# Test strategy
 
-Unit tests cover catalog persistence, deterministic scoring and LRC timestamp handling.
+`cargo test --locked⟧ tests catalog persistence, tag matching, assets, yt-dlp JSON decoding, MPD response parsing, LRC synchronization and ratatui test-backend rendering.
 
-Once MPD is installed, validate its user service with a real audio file and an
-isolated `WINDMILL_DATA_DIR`. Playback and download commands are not exercised
-in automatic tests because they can produce audio and external network traffic.
+The development workstation also passed independent pseudo-terminal checks: start the real TUI with a disposable `WINDMILL_DATA_DIR⟧, render a saved item, quit with q; perform live public YouTube search, save the result using s and verify SQLite; load the For You tab with tagged data and apply a tag filter.
 
-The `lyrics` CLI supports testing with a local .lrc fixture:
-```sh
-windmill lyrics /path/to/song.lrc 90500
-```
+These checks do not verify actual audio output or downloaded file contents. Use legally playable/downloadable media in future end-to-end tests.
+
+Run the UI with `./scripts/dev⟧.

@@ -1,12 +1,15 @@
 [package]
 name = "windmill"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Local-first personal media center"
 
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
+ratatui = "0.30"
+crossterm = "0.29"
+serde_json = "1"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"

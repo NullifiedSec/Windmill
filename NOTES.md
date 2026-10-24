@@ -4,3 +4,4 @@
 2026-10-25 - src/lyrics.rs, src/main.rs - Added LRC parser and timestamped lyric preview - foundation for player-neutral synchronized lyrics
 2026-10-25 - docs/MPD-SETUP.md - Documented user-scoped MPD/PipeWire configuration and localhost endpoint - reproducible integration without system service
 2026-10-25 - upstream/, docs/UPSTREAM.md, .gitignore, README.md - Added isolated shallow reference clones and pinned revisions - inspect integrations without vendoring upstream or modifying host packages
+2026-10-25 - feature/windmill-tui-playback - Added ratatui UI, MPD/mpv adapters, public YouTube discovery and linked offline assets - interactive vertical slice; remaining limitations in docs

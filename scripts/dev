@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo"
+if [[ -x "$repo/.tools/cargo/bin/cargo" ]]; then
+    export CARGO_HOME="$repo/.tools/cargo"
+    export RUSTUP_HOME="$repo/.tools/rustup"
+    export PATH="$CARGO_HOME/bin:$PATH"
+fi
+exec cargo run --locked -- "$@"

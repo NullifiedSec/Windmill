@@ -24,6 +24,12 @@ impl Store {
               media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
               tag TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(media_id,tag)
             );
+            CREATE TABLE IF NOT EXISTS assets (
+              media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              kind TEXT NOT NULL CHECK(kind IN ('audio','video')),
+              path TEXT NOT NULL,
+              PRIMARY KEY(media_id,kind)
+            );
             CREATE TABLE IF NOT EXISTS collections (name TEXT PRIMARY KEY COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS membership (
               collection_name TEXT NOT NULL REFERENCES collections(name) ON DELETE CASCADE,
@@ -71,6 +77,56 @@ impl Store {
             })
         })?
         .collect()
+    }
+    pub fn tags_for(&self, id: i64) -> Result<Vec<String>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT tag FROM tags WHERE media_id=?1 ORDER BY tag COLLATE NOCASE")?;
+        q.query_map([id], |r| r.get(0))?.collect()
+    }
+    pub fn top_tags(&self, limit: usize) -> Result<Vec<String>> {
+        let mut q = self.conn.prepare(
+            "SELECT tag FROM tags
+            GROUP BY tag COLLATE NOCASE
+            ORDER BY COUNT(*) DESC, tag COLLATE NOCASE
+            LIMIT ?1",
+        )?;
+        q.query_map([limit as i64], |r| r.get(0))?.collect()
+    }
+    pub fn collections(&self) -> Result<Vec<String>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT name FROM collections ORDER BY name COLLATE NOCASE")?;
+        q.query_map([], |r| r.get(0))?.collect()
+    }
+    pub fn has(&self, source: &str) -> Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media WHERE source=?1)",
+            [source],
+            |r| r.get(0),
+        )
+    }
+    pub fn asset(&self, id: i64, kind: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT path FROM assets WHERE media_id=?1 AND kind=?2",
+                params![id, kind],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+    pub fn save_asset(&self, id: i64, kind: &str, path: &Path) -> Result<()> {
+        if !matches!(kind, "audio" | "video") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let path = path.to_string_lossy();
+        self.conn.execute(
+            "INSERT INTO assets(media_id,kind,path) VALUES (?1,?2,?3)
+            ON CONFLICT(media_id,kind) DO UPDATE SET path=excluded.path",
+            params![id, kind, path.as_ref()],
+        )?;
+        Ok(())
     }
     pub fn tag(&self, id: i64, tag: &str) -> Result<()> {
         self.conn.execute(
@@ -169,6 +225,54 @@ mod tests {
         assert_eq!(s.recommend(["windmill"].into_iter()).unwrap()[0].0, 1);
         s.untag(id, "windmill").unwrap();
         assert!(s.recommend(["windmill"].into_iter()).unwrap().is_empty());
+    }
+    #[test]
+    fn tag_and_collection_queries_are_independent() {
+        let s = Store::open(Path::new(":memory:")).unwrap();
+        let id = s.add("some-path.mp3", "Song", "Unknown").unwrap();
+        s.tag(id, "peaceful").unwrap();
+        s.tag(id, "Windmill").unwrap();
+        s.create_collection("My Mood").unwrap();
+        s.add_to_collection("My Mood", id).unwrap();
+        assert_eq!(s.tags_for(id).unwrap(), vec!["peaceful", "Windmill"]);
+        assert_eq!(s.collections().unwrap(), vec!["My Mood"]);
+        assert!(s.has("some-path.mp3").unwrap());
+        assert!(!s.has("missing").unwrap());
+    }
+    #[test]
+    fn most_used_tags_are_stable_and_local() {
+        let s = Store::open(Path::new(":memory:")).unwrap();
+        let a = s.add("a", "A", "Artist").unwrap();
+        let b = s.add("b", "B", "Artist").unwrap();
+        s.tag(a, "peaceful").unwrap();
+        s.tag(b, "peaceful").unwrap();
+        s.tag(a, "night").unwrap();
+        assert_eq!(s.top_tags(2).unwrap(), vec!["peaceful", "night"]);
+    }
+    #[test]
+    fn local_assets_keep_one_catalog_identity() {
+        let s = Store::open(Path::new(":memory:")).unwrap();
+        let id = s
+            .add(
+                "https://www.youtube.com/watch?v=HyHNuVaZJ-k",
+                "Video",
+                "Gorillaz",
+            )
+            .unwrap();
+        s.save_asset(id, "audio", Path::new("/tmp/example.opus"))
+            .unwrap();
+        s.save_asset(id, "video", Path::new("/tmp/example.mp4"))
+            .unwrap();
+        assert_eq!(s.all().unwrap().len(), 1);
+        assert_eq!(
+            s.asset(id, "audio").unwrap().as_deref(),
+            Some("/tmp/example.opus")
+        );
+        assert_eq!(
+            s.asset(id, "video").unwrap().as_deref(),
+            Some("/tmp/example.mp4")
+        );
+        assert!(s.save_asset(id, "banana", Path::new("/tmp/abc")).is_err());
     }
     #[test]
     fn recommendation_is_deterministic() {
