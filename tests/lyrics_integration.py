@@ -86,6 +86,18 @@ def main():
                 "SELECT offset_ms FROM lyric_offsets WHERE source=?", (str(music),)
             ).fetchone()
             assert offset == (250,), f"Timing offset not saved: {offset}"
+            os.write(master, b"o+12.5\r")
+            capture(master, process, data, .35)
+            offset = sqlite3.connect(root / "profile" / "library.db").execute(
+                "SELECT offset_ms FROM lyric_offsets WHERE source=?", (str(music),)
+            ).fetchone()
+            assert offset == (12500,), f"Exact video-intro offset failed: {offset}"
+            os.write(master, b"[")
+            capture(master, process, data, .2)
+            offset = sqlite3.connect(root / "profile" / "library.db").execute(
+                "SELECT offset_ms FROM lyric_offsets WHERE source=?", (str(music),)
+            ).fetchone()
+            assert offset == (12250,), f"Fine tuning after exact offset failed: {offset}"
             os.write(master, b"k")
             capture(master, process, data, .25)
             os.write(master, b"\r")
@@ -95,7 +107,7 @@ def main():
             os.write(master, b"q")
             assert process.wait(timeout=5) == 0
             assert b"Error:" not in data, "TUI reported error during lyric seek/follow"
-            print("PASS: local lyrics, current-line rendering, timing persistence, line navigation, seek, auto-follow, clean exit")
+            print("PASS: local lyrics, exact 12.5s intro offset, fine tuning, line navigation, seek, auto-follow, clean exit")
         finally:
             if process.poll() is None:
                 process.terminate()

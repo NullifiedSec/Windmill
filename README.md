@@ -2,7 +2,7 @@
 
 **Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Current status: v0.3.0 — synchronized lyrics and desktop media controls
+## Current status: v0.3.1 — precise per-video lyrics offsets
 
 The Rust terminal interface has five working views:
 
@@ -49,12 +49,24 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `Space`, `n`, `x` | Pause/resume, next, stop |
 | `r` | Reload local catalog |
 | `q` | Quit (also closes mpv launched by Windmill) |
+| `o` | Set exact signed lyrics offset (e.g. `+12.5` or `-00:03.250`) |
 | `[` / `]` | Lyrics earlier/later in 250 ms steps (Now Playing) |
 | `0` | Reset lyric offset (Now Playing) |
 | `j/k`, Enter | Browse lyric lines and seek to selected timed line (Now Playing) |
 | `a` / `L` | Auto-follow / refresh LRCLIB lookup (Now Playing) |
 
 MPD must be running (`systemctl --user start mpd.service`). The configured MPD library root is `~/Music`. Files outside MPD's music directory remain playable using mpv.
+
+### Music-video lyric timing
+
+For music videos with an intro, enter **Now Playing** (press `5`),
+press `o`, then type `+12.5` (seconds) or `+00:12.500` (minutes:seconds)
+to delay the lyrics by 12.5 seconds. A negative value like `-3.25`
+makes them appear earlier. `[` / `]` fine-tune; `0` resets.
+
+Offsets persist per original media URL, even when playing the downloaded copy.
+Because intros/outros make videos longer than the actual song, matching
+lyrics for videos doesn't require the same recording duration.
 
 ## Desktop media controls (playerctl)
 

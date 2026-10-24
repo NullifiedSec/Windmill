@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -110,20 +110,32 @@ impl Store {
             |r| r.get(0),
         )
     }
-    pub fn lyrics_offset(&self, source: &str) -> Result<i64> {
+    pub fn lyrics_offset_optional(&self, source: &str) -> Result<Option<i64>> {
         self.conn
             .query_row(
                 "SELECT offset_ms FROM lyric_offsets WHERE source=?1",
                 [source],
                 |r| r.get(0),
             )
-            .or_else(|e| {
-                if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                    Ok(0)
-                } else {
-                    Err(e)
-                }
-            })
+            .optional()
+    }
+    pub fn lyrics_offset(&self, source: &str) -> Result<i64> {
+        Ok(self.lyrics_offset_optional(source)?.unwrap_or(0))
+    }
+    /// When a previously-streamed track gets downloaded, keep its existing
+    /// timing correction under the original media identity. Existing explicit
+    /// zero offsets are respected, not mistaken for missing data.
+    pub fn lyrics_offset_with_legacy(&self, source: &str, previous: Option<&str>) -> Result<i64> {
+        if let Some(value) = self.lyrics_offset_optional(source)? {
+            return Ok(value);
+        }
+        if let Some(previous) = previous.filter(|s| *s != source)
+            && let Some(value) = self.lyrics_offset_optional(previous)?
+        {
+            self.set_lyrics_offset(source, value)?;
+            return Ok(value);
+        }
+        self.lyrics_offset(source)
     }
     pub fn set_lyrics_offset(&self, source: &str, ms: i64) -> Result<()> {
         self.conn.execute(
@@ -265,6 +277,26 @@ mod tests {
         assert_eq!(s.collections().unwrap(), vec!["My Mood"]);
         assert!(s.has("some-path.mp3").unwrap());
         assert!(!s.has("missing").unwrap());
+    }
+    #[test]
+    fn video_offset_survives_local_asset_change() {
+        let s = Store::open(Path::new(":memory:")).unwrap();
+        s.set_lyrics_offset("/tmp/downloaded-music-video.mp4", 13_250)
+            .unwrap();
+        let original = "https://www.youtube.com/watch?v=HyHNuVaZJ-k";
+        assert_eq!(
+            s.lyrics_offset_with_legacy(original, Some("/tmp/downloaded-music-video.mp4"))
+                .unwrap(),
+            13_250
+        );
+        assert_eq!(s.lyrics_offset(original).unwrap(), 13_250);
+        s.set_lyrics_offset(original, 0).unwrap();
+        assert_eq!(
+            s.lyrics_offset_with_legacy(original, Some("/tmp/downloaded-music-video.mp4"))
+                .unwrap(),
+            0
+        );
+        assert_eq!(s.lyrics_offset_with_legacy("other", None).unwrap(), 0);
     }
     #[test]
     fn lyric_adjustment_persists_without_modifying_files() {

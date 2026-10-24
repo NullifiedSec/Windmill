@@ -1,6 +1,7 @@
 //! Interactive Windmill terminal front end. No application-specific background daemon.
 use crate::{
     download::{self, Kind},
+    lyric_offset::{MAX_ABS_OFFSET_MS, format_offset_ms, parse_offset_ms},
     lyric_source::{self, Document, Loaded, Request},
     mpris::{self, Control, Snapshot},
     player::{self, Engine, Playback, Status},
@@ -74,16 +75,25 @@ enum Prompt {
     Tag(String),
     Collection(String),
     Filter(String),
+    LyricOffset(String),
 }
 impl Prompt {
     fn text(&self) -> &str {
         match self {
-            Self::Search(t) | Self::Tag(t) | Self::Collection(t) | Self::Filter(t) => t,
+            Self::Search(t)
+            | Self::Tag(t)
+            | Self::Collection(t)
+            | Self::Filter(t)
+            | Self::LyricOffset(t) => t,
         }
     }
     fn text_mut(&mut self) -> &mut String {
         match self {
-            Self::Search(t) | Self::Tag(t) | Self::Collection(t) | Self::Filter(t) => t,
+            Self::Search(t)
+            | Self::Tag(t)
+            | Self::Collection(t)
+            | Self::Filter(t)
+            | Self::LyricOffset(t) => t,
         }
     }
     fn label(&self) -> &str {
@@ -92,6 +102,7 @@ impl Prompt {
             Self::Tag(_) => "Add tag",
             Self::Collection(_) => "Create & add collection",
             Self::Filter(_) => "Recommendation tags, comma-separated",
+            Self::LyricOffset(_) => "Lyrics offset (+seconds or -mm:ss.sss) — Enter saves",
         }
     }
 }
@@ -256,12 +267,30 @@ impl App {
     fn current_lyric_request(&self) -> Option<Request> {
         if self.player.engine == Some(Engine::Mpv) {
             let media = self.player.active.as_ref()?;
+            // MPV can play a downloaded copy, but it is the SAME catalog video.
+            // Keep offset and lyrics cache under its original URL/identity.
+            let original = if media.id > 0 {
+                self.store.get(media.id).ok().map(|m| m.source)
+            } else {
+                None
+            };
+            let source = original.unwrap_or_else(|| media.source.clone());
             let file = Path::new(&media.source);
+            let ext = file
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let video = source.starts_with("https://")
+                || source.starts_with("http://")
+                || ["mp4", "mkv", "webm", "mov", "avi", "m4v"]
+                    .contains(&ext.to_ascii_lowercase().as_str());
             return Some(Request {
-                source: media.source.clone(),
+                source,
                 title: media.title.clone(),
                 artist: media.creator.clone(),
-                duration_ms: self.duration_ms,
+                // A music-video intro/outro makes VIDEO duration longer than
+                // the song's LRCLIB duration. Don't reject a correct match.
+                duration_ms: if video { None } else { self.duration_ms },
                 sidecar: file.is_file().then(|| file.with_extension("lrc")),
             });
         }
@@ -318,7 +347,11 @@ impl App {
         self.lyric_pending = true;
         self.lyric_status = "Finding synchronized lyrics...".into();
         self.lyric_origin.clear();
-        self.lyric_offset_ms = self.store.lyrics_offset(&request.source).unwrap_or(0);
+        let legacy = self.player.active.as_ref().map(|m| m.source.as_str());
+        self.lyric_offset_ms = self
+            .store
+            .lyrics_offset_with_legacy(&request.source, legacy)
+            .unwrap_or(0);
         let data_dir = match crate::data_dir() {
             Ok(dir) => dir,
             Err(e) => {
@@ -333,21 +366,25 @@ impl App {
             let _ = tx.send(LyricResponse { key, result });
         });
     }
-    fn nudge_lyrics(&mut self, delta_ms: i64) {
+    fn set_lyric_offset(&mut self, offset_ms: i64) {
         if self.lyric_key.is_none() {
+            self.status = "Play a song before adjusting its lyrics".into();
             return;
         }
-        let ms = self
-            .lyric_offset_ms
-            .saturating_add(delta_ms)
-            .clamp(-60_000, 60_000);
-        match self.store.set_lyrics_offset(&self.lyric_source, ms) {
+        let offset_ms = offset_ms.clamp(-MAX_ABS_OFFSET_MS, MAX_ABS_OFFSET_MS);
+        match self.store.set_lyrics_offset(&self.lyric_source, offset_ms) {
             Ok(()) => {
-                self.lyric_offset_ms = ms;
-                self.status = format!("Lyrics timing: {:+} ms (saved)", ms);
+                self.lyric_offset_ms = offset_ms;
+                self.status = format!(
+                    "Lyrics offset {} (saved for this recording)",
+                    format_offset_ms(offset_ms)
+                );
             }
             Err(e) => self.message_error(e),
         }
+    }
+    fn nudge_lyrics(&mut self, delta_ms: i64) {
+        self.set_lyric_offset(self.lyric_offset_ms.saturating_add(delta_ms));
     }
     fn move_lyric_cursor(&mut self, delta: isize) {
         let size = match self.lyrics.as_ref() {
@@ -528,6 +565,10 @@ impl App {
                     Err(e) => self.message_error(e),
                 }
             }
+            Prompt::LyricOffset(value) => match parse_offset_ms(&value) {
+                Ok(ms) => self.set_lyric_offset(ms),
+                Err(problem) => self.status = format!("Invalid lyrics offset: {problem}"),
+            },
             Prompt::Collection(value) => {
                 if let Some(id) = self.selected_media().map(|m| m.id) {
                     let result = self
@@ -685,6 +726,15 @@ impl App {
                 self.status = "Lyrics auto-follow enabled".into();
             }
             KeyCode::Char('L') if self.tab == Tab::Playing => self.load_lyrics(true),
+            KeyCode::Char('o') if self.tab == Tab::Playing => {
+                if self.lyric_key.is_some() {
+                    self.prompt = Some(Prompt::LyricOffset(String::new()));
+                    self.status =
+                        format!("Current offset: {}", format_offset_ms(self.lyric_offset_ms));
+                } else {
+                    self.status = "Play a song before setting lyrics offset".into();
+                }
+            }
             KeyCode::Char('[') if self.tab == Tab::Playing => self.nudge_lyrics(-250),
             KeyCode::Char(']') if self.tab == Tab::Playing => self.nudge_lyrics(250),
             KeyCode::Char('0') if self.tab == Tab::Playing => {
@@ -1175,22 +1225,23 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         info[1],
     );
     frame.render_widget(Paragraph::new(
-        "Space play/pause · n next · x stop\n[ / ] timing ±250ms · 0 reset\nj/k browse lyrics · Enter seek · a follow · L refresh")
+        "Space play/pause · n next · x stop\no exact offset · [ / ] ±250ms · 0 reset\nj/k browse lyrics · Enter seek · a follow · L refresh")
         .block(panel(" Lyrics controls ")).wrap(Wrap{trim:true})
         .style(Style::default().fg(MUTED)),info[2]);
     draw_lyrics(frame, app, right, elapsed);
 }
 fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
-    let title = if app.lyric_pending {
-        " Lyrics · searching... ".into()
+    let state = if app.lyric_pending {
+        "searching..."
     } else if app.lyric_origin.is_empty() {
-        " Lyrics ".into()
+        "Lyrics"
     } else {
-        format!(
-            " Lyrics · {} · {:+} ms ",
-            app.lyric_origin, app.lyric_offset_ms
-        )
+        app.lyric_origin.as_str()
     };
+    let title = format!(
+        " {state} · offset {} ",
+        format_offset_ms(app.lyric_offset_ms)
+    );
     let Some(doc) = app.lyrics.as_ref() else {
         let text = format!(
             "\n\n{}\n\nLocal .lrc files are preferred.\nLRCLIB results are cached offline.\n\nPress L to search again.",
@@ -1319,6 +1370,38 @@ mod tests {
             app.tab = tab;
             terminal.draw(|frame| draw(frame, &app)).unwrap();
         }
+    }
+    #[test]
+    fn video_lyrics_use_original_identity_and_allow_precise_edits() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let url = "https://www.youtube.com/watch?v=HyHNuVaZJ-k";
+        let id = store.add(url, "Feel Good Inc.", "Gorillaz").unwrap();
+        let mut app = App::new(store).unwrap();
+        app.player.active = Some(Media {
+            id,
+            source: "/tmp/video-download.mp4".into(),
+            title: "Feel Good Inc.".into(),
+            creator: "Gorillaz".into(),
+        });
+        app.player.engine = Some(Engine::Mpv);
+        app.duration_ms = Some(295_000);
+        let req = app.current_lyric_request().unwrap();
+        assert_eq!(req.source, url);
+        // Music-video intros/outros should not exclude LRCLIB's shorter recording.
+        assert_eq!(req.duration_ms, None);
+        app.tab = Tab::Playing;
+        app.lyric_key = Some("fixture".into());
+        app.lyric_source = req.source;
+        assert!(!app.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)));
+        assert!(matches!(app.prompt, Some(Prompt::LyricOffset(_))));
+        for c in "+12.5".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.lyric_offset_ms, 12_500);
+        assert_eq!(app.store.lyrics_offset(url).unwrap(), 12_500);
+        app.key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(app.store.lyrics_offset(url).unwrap(), 12_250);
     }
     #[test]
     fn input_state_and_selection() {

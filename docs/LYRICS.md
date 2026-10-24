@@ -1,4 +1,4 @@
-# Windmill lyrics (v0.3.0)
+# Windmill lyrics (v0.3.1)
 
 ## Source priority
 
@@ -12,6 +12,7 @@ Windmill uses TLS-verified curl with timeouts, response-size limits, and no Goog
 
 | Key | Action |
 |---|---|
+| `o` | Set precise offset, e.g. `+12.5` seconds or `-00:03.250` |
 | `[` | Advance lyrics 250 ms |
 | `]` | Delay lyrics 250 ms |
 | `0` | Reset timing offset |
@@ -20,7 +21,26 @@ Windmill uses TLS-verified curl with timeouts, response-size limits, and no Goog
 | `a` | Return to auto-follow |
 | `L` | Refresh lookup manually |
 
+**Example:** A music video with a 13-second spoken intro needs `+13`.
+Press `o` and enter `+13` or `+00:13.000`. This delays the lyrics,
+without skipping video content. `-2.5` displays lyrics 2.5 seconds earlier.
+
+Inputs *replace* the current offset; they do not add to it. They accept
+signed seconds or mm:ss.sss, are rounded to 1 ms and bounded by ±60 minutes.
+Invalid input leaves the previous offset unchanged. The Now Playing
+lyrics panel always shows the signed offset; `[` / `]` fine-tune it.
+
 Timing adjustments persist in SQLite without modifying the media file or .lrc sidecar.
+Catalog video offsets are keyed to the original URL, even when mpv plays a
+downloaded file. Existing offsets saved against local file paths migrate on
+first access; explicit zeroes remain zero. Intros/outros make music videos
+longer than the album recording, so videos aren't rejected from LRCLIB for
+differing track duration. Audio-only files still use duration matching.
+
+A single offset shifts the entire song timeline. It cannot handle extra
+footage inserted *mid-song*; that would need segment-specific timing.
+
+
 
 The current line is centered/highlighted, while neighboring lines fade. Enhanced LRC with inline `<mm:ss.xx>` segment timestamps enables word/segment highlighting. Normal LRCLIB results are usually line-timed, so per-word accuracy cannot be invented.
 

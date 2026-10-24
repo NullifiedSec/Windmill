@@ -22,3 +22,16 @@ Run `python3 tests/lyrics_integration.py`: silent mpv, private D-Bus, temporary 
 The real LRCLIB HTTP test is opt-in:
 `cargo test --locked -- --ignored real_provider_fetches_and_reuses_private_cache`.
 The test uses temporary storage and never commits lyric content.
+
+
+## Music-video offset integration
+
+Run `python3 tests/video_lyrics_offset_integration.py` after building.
+It creates a silent test video, links it to a mock YouTube media entry,
+sets `+12.5` in the real TUI, restarts the application, and confirms
+the offset is saved under the original URL. It does not access the
+user's library, audio devices, or online sources.
+
+`tests/lyrics_integration.py` also enters an exact offset with `o` then
+fine-tunes with `[`. Parser tests cover decimal seconds, mm:ss.sss,
+invalid text and out-of-range offsets.
