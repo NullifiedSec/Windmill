@@ -53,3 +53,11 @@ The `src/seek.rs` tests cover timestamp expressions and progress-bar
 coordinates. `tests/mpris_integration.py` sends real arrow and mouse
 events to silent MPD/mpv, tests a jump to timestamp, and verifies `z`
 restores previous playback positions.
+
+
+## Tap Sync pause/resume regression
+
+The isolated MPRIS integration test also enters Tap Sync during both
+silent MPD and mpv playback and presses p twice. It verifies paused
+then playing states through playerctl, ensuring the Space cue marker
+remains separate.

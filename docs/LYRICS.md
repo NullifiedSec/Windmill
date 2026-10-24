@@ -1,4 +1,4 @@
-# Windmill lyrics (v0.3.2)
+# Windmill lyrics (v0.3.4)
 
 ## Source priority
 
@@ -13,6 +13,7 @@ Windmill uses TLS-verified curl with timeouts, response-size limits, and no Goog
 | Key | Action |
 |---|---|
 | `s` | Toggle guided Tap Sync mode |
+| `p` | Play/pause without exiting Tap Sync |
 | `Space` / `Enter` | During Tap Sync, mark the start of the selected lyric at the current live playback time |
 | `Esc` | Cancel Tap Sync before marking |
 | `u` | Undo the previous successful Tap Sync correction |
@@ -31,6 +32,11 @@ With the song playing, press `s` in Now Playing. Windmill chooses the
 first nonempty timestamped lyric line; select a different one using
 `j/k` or the arrow keys. **Press Space at the instant you hear the selected
 line begin.** Enter can also mark. This does not pause or seek the song.
+
+**Need to pause while lining things up?** Press `p` to pause and `p`
+again to resume. Space is reserved for the lyric marker in this
+mode. The controls pane and footer explain this mapping.
+Outside Tap Sync, Space also works as a play/pause toggle.
 
 Windmill reads a fresh timestamp from MPD/mpv, then computes:
 

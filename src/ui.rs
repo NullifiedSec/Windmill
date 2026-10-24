@@ -428,7 +428,8 @@ impl App {
         self.lyric_cursor = first;
         self.lyric_follow = false;
         self.tap_sync = true;
-        self.status="TAP SYNC: choose the line with j/k; press SPACE exactly when you hear it begin. Esc cancels.".into();
+        self.status =
+            "TAP SYNC: p play/pause, j/k choose lyric, SPACE mark when heard, Esc cancel.".into();
     }
     /// Real-time handler obtains a fresh playback position rather than using
     /// the previous UI refresh (which may be up to 350ms stale).
@@ -908,6 +909,32 @@ impl App {
             None
         }
     }
+    fn toggle_playback(&mut self) {
+        if !self.mpris_snapshot().can_play {
+            self.status = "No playable track. Choose a song first.".into();
+            return;
+        }
+        match self.player.toggle() {
+            Ok(()) => {
+                self.mpd = player::mpd_status().ok();
+                let paused = if self.player.engine == Some(Engine::Mpv) {
+                    self.player.paused
+                } else {
+                    self.mpd
+                        .as_ref()
+                        .is_some_and(|status| status.state == "pause")
+                };
+                self.status = if paused {
+                    "Playback paused. Press p again to resume (Space marks lyrics in Tap Sync)."
+                } else {
+                    "Playback resumed. Press Space when the selected lyric starts."
+                }
+                .into();
+                self.last_tick = Instant::now() - Duration::from_secs(2);
+            }
+            Err(e) => self.message_error(e),
+        }
+    }
     fn key(&mut self, key: KeyEvent) -> bool {
         if key.kind != KeyEventKind::Press {
             return false;
@@ -933,6 +960,7 @@ impl App {
                 self.lyric_follow = true;
                 self.status = "Tap Sync cancelled. No offset changed.".into();
             }
+            KeyCode::Char('p') if self.tab == Tab::Playing => self.toggle_playback(),
             KeyCode::Char('s') if self.tab == Tab::Playing => self.toggle_tap_sync(),
             KeyCode::Char('u') if self.tab == Tab::Playing => self.undo_tap_sync(),
             KeyCode::Char(' ') | KeyCode::Enter if self.tab == Tab::Playing && self.tap_sync => {
@@ -1044,11 +1072,7 @@ impl App {
             {
                 self.download(Kind::Video);
             }
-            KeyCode::Char(' ') => {
-                if let Err(e) = self.player.toggle() {
-                    self.message_error(e)
-                }
-            }
+            KeyCode::Char(' ') => self.toggle_playback(),
             KeyCode::Char('x') => {
                 self.tap_sync = false;
                 self.seek_undo = None;
@@ -1251,8 +1275,17 @@ fn draw(frame: &mut Frame, app: &App) {
             .wrap(Wrap { trim: true }),
         layout[2],
     );
-    frame.render_widget(Paragraph::new("←/→ ±5s · Shift+←/→ ±30s · g jump · z undo · click progress · 1-5 tabs · / search · Space pause · q quit")
-        .style(Style::default().fg(MUTED)).block(panel(" Keys ")),layout[3]);
+    let bottom_hint = if app.tap_sync {
+        "TAP SYNC: p play/pause · SPACE mark lyric · Esc cancel · ←/→ seek · q quit"
+    } else {
+        "←/→ ±5s · Shift+←/→ ±30s · g jump · z undo · click progress · 1-5 tabs · Space/p pause · q quit"
+    };
+    frame.render_widget(
+        Paragraph::new(bottom_hint)
+            .style(Style::default().fg(MUTED))
+            .block(panel(" Keys ")),
+        layout[3],
+    );
 }
 fn select_list(
     frame: &mut Frame,
@@ -1526,15 +1559,15 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         }
         .unwrap_or_else(|| "Choose a lyric line".into());
         format!(
-            "SELECTED: {cue}\n↑/↓ or j/k choose another lyric\nSPACE / Enter = TAP when you HEAR it\nEsc = cancel without changing offset"
+            "SELECTED: {cue}\np PLAY / PAUSE · j/k choose a lyric\nSPACE / Enter = MARK when heard\nEsc cancels without changing offset"
         )
     } else {
-        "←/→ ±5s · Shift+arrows ±30s\ng jump · z undo skip · click progress\ns TAP SYNC · o lyric offset · Space pause\nj/k lyrics · Enter line · u undo tap".into()
+        "←/→ ±5s · Shift+arrows ±30s\ng jump · z undo skip · click progress\ns TAP SYNC · p/Space pause · o offset\nj/k lyrics · Enter line · u undo tap".into()
     };
     frame.render_widget(
         Paragraph::new(controls)
             .block(panel(if app.tap_sync {
-                " TAP SYNC · playback keeps running "
+                " TAP SYNC · p play/pause, SPACE mark "
             } else {
                 " Lyrics controls "
             }))

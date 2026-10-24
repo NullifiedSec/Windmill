@@ -2,7 +2,7 @@
 
 **Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Current status: v0.3.3 — easy timeline seeking and one-tap lyric sync
+## Current status: v0.3.4 — playable Tap Sync controls and easy seeking
 
 The Rust terminal interface has five working views:
 
@@ -57,6 +57,7 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `r` | Reload local catalog |
 | `q` | Quit (also closes mpv launched by Windmill) |
 | `s` | Start/exit guided Tap Sync (Now Playing) |
+| `p` | Play/pause in Now Playing, including during Tap Sync (Space remains the lyric marker) |
 | `Space` / `Enter` | In Tap Sync mode, mark the moment you hear the selected lyric |
 | `Esc` | Cancel Tap Sync without changing the offset |
 | `u` | Undo the most recent successful Tap Sync mark |
@@ -88,6 +89,11 @@ start**. This marks the current live MPD/mpv playback position as the timestamp
 for that lyric, calculates the exact offset, and persists it. Playback
 continues during marking. `u` restores your previous offset; `Esc` cancels
 without changing it.
+
+**If playback is paused while setting up Tap Sync, press `p` to resume.**
+`p` toggles playback in normal Now Playing and Tap Sync modes;
+`Space` stays reserved for marking the cue while Tap Sync is active.
+This avoids interrupting playback when capturing the exact moment.
 
 No need to estimate intro lengths. For finer control, `[` / `]` still
 adjust the result by 250 ms. This requires synchronized LRC/lyrics, not

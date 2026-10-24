@@ -54,6 +54,11 @@ def main():
                 "-i", "anullsrc=r=44100:cl=stereo", "-t", "20", "-c:a",
                 "pcm_s16le", str(music / name),
             ], check=True, timeout=15)
+        # A real timestamped sidecar allows Tap Sync on both MPD and mpv.
+        (music / "first.lrc").write_text(
+            "[00:00.10]This is the first line\n"
+            "[00:04.00]This is the second line\n"
+        )
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -119,6 +124,18 @@ def main():
             os.write(master, b"m")
             capture(master, tui, screen, 1)
             assert ctl("status") == "Playing"
+            # p must remain play/pause inside Tap Sync while Space marks lyrics.
+            os.write(master,b"s")
+            capture(master,tui,screen,.3)
+            assert b"TAP SYNC" in screen
+            os.write(master,b"p")
+            capture(master,tui,screen,.35)
+            assert ctl("status") == "Paused", "MPD Tap Sync p did not pause"
+            os.write(master,b"p")
+            capture(master,tui,screen,.35)
+            assert ctl("status") == "Playing", "MPD Tap Sync p did not resume"
+            os.write(master,b"\x1b")
+            capture(master,tui,screen,.3)
             assert ctl("metadata", "--format", "{{title}}") == "Custom Windmill Title"
             assert ctl("metadata", "--format", "{{artist}}") == "Custom Artist"
             assert float(ctl("position")) >= 0
@@ -159,6 +176,16 @@ def main():
             capture(master,tui,screen,1.0)
             assert ctl("status") == "Playing", f"mpv state: {ctl('status')}"
             assert ctl("metadata","--format","{{title}}") == "Custom Windmill Title"
+            os.write(master,b"s")
+            capture(master,tui,screen,.3)
+            os.write(master,b"p")
+            capture(master,tui,screen,.35)
+            assert ctl("status")=="Paused", "mpv Tap Sync p did not pause"
+            os.write(master,b"p")
+            capture(master,tui,screen,.35)
+            assert ctl("status")=="Playing", "mpv Tap Sync p did not resume"
+            os.write(master,b"\x1b")
+            capture(master,tui,screen,.3)
             ctl("pause")
             capture(master,tui,screen,.4)
             assert ctl("status")=="Paused"
@@ -204,7 +231,7 @@ def main():
             assert tui.wait(timeout=3) == 0
             assert b"Error:" not in screen, "The TUI reported an operation error"
             assert "windmill" not in run("playerctl", "-l", env=env).stdout.splitlines()
-            print("PASS: MPD/mpv: MPRIS and terminal arrows, jump-to-time, mouse progress seek and undo")
+            print("PASS: MPD/mpv: Tap Sync p play/pause, MPRIS, arrows, exact jump, mouse seek and undo")
         finally:
             if tui is not None and tui.poll() is None:
                 tui.terminate()

@@ -10,3 +10,4 @@
 2026-10-25 - feature/lyrics-video-offset - Implemented precise video lyric shift via o prompt, shared online/offline identity, previous offset migration and music-video runtime mismatch handling - verified with isolated video and lyrics tests
 2026-10-25 - feature/lyrics-tap-sync - Added guided listen-and-tap lyric alignment, live MPD/mpv clock capture, persisted offset, undo and cancel - verified with silent PTY and unit tests
 2026-10-25 - feature/easy-playback-seeking - Added 5/30/60s navigation, typed jump-to-time, clickable progress bar, undo, and mpv error propagation - verified by isolated MPD/mpv integration tests
+2026-10-25 - fix/tap-sync-playback-control - Added p play/pause in Now Playing and Tap Sync without stealing Space cue input; clarified mode-specific help; verified against silent MPD/mpv MPRIS states

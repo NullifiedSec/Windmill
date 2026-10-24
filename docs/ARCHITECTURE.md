@@ -62,3 +62,12 @@ MPD or mpv playback adapter. The previous position is held in a
 track-scoped, one-step undo. The progress bar's rectangle is calculated
 using the same Ratatui layout constraints as the renderer. Backend
 errors, including mpv JSON IPC errors, are surfaced to the user.
+
+
+## Tap Sync transport controls
+
+While Tap Sync is active, Space and Enter trigger the timestamp marker
+instead of pausing. The p key toggles playback from the same Now Playing
+view without leaving cue mode, using the MPD/mpv playback coordinator.
+The normal transport controls remain available outside that mode.
+The TUI renders mode-specific key hints to prevent ambiguity.

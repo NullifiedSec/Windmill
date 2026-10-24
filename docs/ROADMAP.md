@@ -12,6 +12,7 @@
 - [x] Local .lrc synchronized lyrics, private LRCLIB cache, manual correction, plain fallback and enhanced LRC word highlighting.
 - [x] Precise per-video lyrics offset editor, stream/offline identity and music-video intro/outro duration handling.
 - [x] Guided Tap Sync workflow: select timestamped lyric, mark current player position without pausing, persisted shift and undo.
+- [x] Tap Sync transport: p pauses and resumes both engines without exiting lyric marking mode.
 - [x] Playback navigation: quick skips, direct timeline jumps, clickable progress bar and undo.
 - [x] Single MPRIS identity for MPD and mpv, including playerctl controls, metadata, volume and seek.
 - [x] Rust unit tests and pseudo-terminal rendering/search/save tests.
