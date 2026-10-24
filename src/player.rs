@@ -123,7 +123,7 @@ pub fn mpd_play(uri: &str) -> Result<()> {
     Ok(())
 }
 
-fn music_dir() -> Result<PathBuf> {
+pub fn music_dir() -> Result<PathBuf> {
     if let Ok(dir) = env::var("WINDMILL_MUSIC_ROOT") {
         return Ok(PathBuf::from(dir));
     }
@@ -332,6 +332,17 @@ impl Playback {
             None => {}
         }
         Ok(())
+    }
+    pub fn duration_ms(&self) -> Option<i64> {
+        match self.engine {
+            Some(Engine::Mpv) => self
+                .ipc(json!(["get_property", "duration"]))
+                .ok()
+                .and_then(|r| r["data"].as_f64())
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|seconds| (seconds * 1000.0) as i64),
+            Some(Engine::Mpd) | None => mpd_status().ok().and_then(|s| s.duration_ms),
+        }
     }
     pub fn volume(&self) -> Option<f64> {
         match self.engine {

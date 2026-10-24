@@ -3,9 +3,15 @@
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Word {
+    pub at_ms: i64,
+    pub text: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub at_ms: i64,
     pub text: String,
+    pub words: Vec<Word>,
 }
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Lyrics {
@@ -40,9 +46,11 @@ impl Lyrics {
                 };
             }
             for stamp in stamps {
+                let (text, words) = parse_enhanced(remaining.trim(), stamp);
                 lyrics.lines.push(Line {
                     at_ms: stamp,
-                    text: remaining.trim().to_string(),
+                    text,
+                    words,
                 });
             }
         }
@@ -61,8 +69,71 @@ impl Lyrics {
         let last = (center.saturating_add(after).saturating_add(1)).min(self.lines.len());
         (active.map(|v| v - first), &self.lines[first..last])
     }
+    pub fn timeline_ms(&self, elapsed_ms: i64) -> i64 {
+        elapsed_ms.saturating_sub(self.offset_ms)
+    }
+    pub fn lines(&self) -> &[Line] {
+        &self.lines
+    }
+    pub fn line_position_ms(&self, index: usize, user_offset_ms: i64) -> Option<i64> {
+        self.lines.get(index).map(|line| {
+            line.at_ms
+                .saturating_add(self.offset_ms)
+                .saturating_add(user_offset_ms)
+        })
+    }
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
+    }
+}
+/// Enhanced LRC: parse inline <mm:ss.xx> segments while keeping a clean
+/// text fallback. Malformed angle brackets remain literal text.
+fn parse_enhanced(input: &str, initial_ms: i64) -> (String, Vec<Word>) {
+    let mut cursor = input;
+    let mut text = String::new();
+    let mut words = Vec::new();
+    let mut at_ms = initial_ms;
+    let mut seen_tag = false;
+    loop {
+        let Some(open) = cursor.find('<') else {
+            if !cursor.is_empty() {
+                text.push_str(cursor);
+                words.push(Word {
+                    at_ms,
+                    text: cursor.to_string(),
+                });
+            }
+            break;
+        };
+        let before = &cursor[..open];
+        if !before.is_empty() {
+            text.push_str(before);
+            words.push(Word {
+                at_ms,
+                text: before.to_string(),
+            });
+        }
+        let after = &cursor[open + 1..];
+        if let Some(close) = after.find('>')
+            && let Some(time) = parse_stamp(&after[..close])
+        {
+            seen_tag = true;
+            at_ms = time;
+            cursor = &after[close + 1..];
+            continue;
+        }
+        // It wasn't a timestamp. Preserve the character without losing text.
+        text.push('<');
+        words.push(Word {
+            at_ms,
+            text: "<".into(),
+        });
+        cursor = after;
+    }
+    if !seen_tag {
+        (text, vec![])
+    } else {
+        (text, words)
     }
 }
 fn parse_stamp(input: &str) -> Option<i64> {
@@ -111,6 +182,23 @@ mod tests {
             around.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
             vec!["first", "second", "third"]
         );
+    }
+    #[test]
+    fn enhanced_lrc_cleans_tags_and_preserves_word_timing() {
+        let l = Lyrics::parse("[00:01.00]<00:01.00>Good <00:01.35>morning");
+        assert_eq!(l.lines()[0].text, "Good morning");
+        assert_eq!(l.lines()[0].words.len(), 2);
+        assert_eq!(l.lines()[0].words[0].at_ms, 1_000);
+        assert_eq!(l.lines()[0].words[1].at_ms, 1_350);
+        let plain = Lyrics::parse("[00:02.00]Hello world");
+        assert!(plain.lines()[0].words.is_empty());
+    }
+    #[test]
+    fn seeks_respect_document_and_manual_offsets() {
+        let l = Lyrics::parse("[offset:100]\n[00:01.00] First");
+        assert_eq!(l.line_position_ms(0, 250), Some(1_350));
+        assert_eq!(l.line_position_ms(3, 0), None);
+        assert_eq!(l.active_index(1350), Some(0));
     }
     #[test]
     fn empty_and_invalid_are_safe() {

@@ -1,7 +1,7 @@
 //! Interactive Windmill terminal front end. No application-specific background daemon.
 use crate::{
     download::{self, Kind},
-    lyrics::Lyrics,
+    lyric_source::{self, Document, Loaded, Request},
     mpris::{self, Control, Snapshot},
     player::{self, Engine, Playback, Status},
     store::{Media, Store},
@@ -15,14 +15,13 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
 use std::{
     error::Error,
-    fs,
     io::{self, IsTerminal},
     path::Path,
     sync::mpsc::{self, Receiver, Sender},
@@ -96,6 +95,10 @@ impl Prompt {
         }
     }
 }
+struct LyricResponse {
+    key: String,
+    result: std::result::Result<Option<Loaded>, String>,
+}
 struct DownloadResponse {
     media_id: i64,
     kind: Kind,
@@ -121,7 +124,18 @@ pub struct App {
     player: Playback,
     mpd: Option<Status>,
     elapsed_ms: Option<i64>,
-    lyrics: Option<Lyrics>,
+    lyrics: Option<Document>,
+    lyric_origin: String,
+    lyric_status: String,
+    lyric_key: Option<String>,
+    lyric_source: String,
+    lyric_offset_ms: i64,
+    lyric_cursor: usize,
+    lyric_follow: bool,
+    lyric_pending: bool,
+    lyric_tx: Sender<LyricResponse>,
+    lyric_rx: Receiver<LyricResponse>,
+    duration_ms: Option<i64>,
     rx: Receiver<SearchResponse>,
     tx: Sender<SearchResponse>,
     last_tick: Instant,
@@ -132,6 +146,7 @@ impl App {
     fn new(store: Store) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
         let (download_tx, download_rx) = mpsc::channel();
+        let (lyric_tx, lyric_rx) = mpsc::channel();
         let media = store.all()?;
         let collections = store.collections()?;
         let tags = store.top_tags(6)?;
@@ -153,6 +168,17 @@ impl App {
             mpd: None,
             elapsed_ms: None,
             lyrics: None,
+            lyric_origin: String::new(),
+            lyric_status: "Select a song to see its lyrics".into(),
+            lyric_key: None,
+            lyric_source: String::new(),
+            lyric_offset_ms: 0,
+            lyric_cursor: 0,
+            lyric_follow: true,
+            lyric_pending: false,
+            lyric_tx,
+            lyric_rx,
+            duration_ms: None,
             tx,
             rx,
             download_tx,
@@ -227,16 +253,142 @@ impl App {
             _ => None,
         }
     }
-    fn find_sidecar(&mut self, media: &Media) {
-        self.lyrics = None;
-        if media.source.starts_with("http://") || media.source.starts_with("https://") {
+    fn current_lyric_request(&self) -> Option<Request> {
+        if self.player.engine == Some(Engine::Mpv) {
+            let media = self.player.active.as_ref()?;
+            let file = Path::new(&media.source);
+            return Some(Request {
+                source: media.source.clone(),
+                title: media.title.clone(),
+                artist: media.creator.clone(),
+                duration_ms: self.duration_ms,
+                sidecar: file.is_file().then(|| file.with_extension("lrc")),
+            });
+        }
+        let mpd = self.mpd.as_ref()?;
+        let file = mpd.file.as_ref()?;
+        let origin = format!("mpd:{file}");
+        let mut request = Request {
+            source: origin,
+            title: mpd.title.clone().unwrap_or_default(),
+            artist: mpd.artist.clone().unwrap_or_default(),
+            duration_ms: mpd.duration_ms,
+            sidecar: player::music_dir()
+                .ok()
+                .map(|root| root.join(file).with_extension("lrc")),
+        };
+        // If this track was selected inside Windmill, keep its user-maintained
+        // artist/title metadata rather than requiring tags embedded in audio files.
+        if let Some(media) = self.player.active.as_ref()
+            && player::mpd_relative(&media.source).ok().as_deref() == Some(file)
+        {
+            request.title = media.title.clone();
+            request.artist = media.creator.clone();
+        }
+        Some(request)
+    }
+    fn load_lyrics(&mut self, refresh: bool) {
+        let Some(request) = self.current_lyric_request() else {
+            self.lyrics = None;
+            self.lyric_key = None;
+            self.lyric_status = "Nothing playing".into();
+            self.lyric_pending = false;
+            return;
+        };
+        let key = format!(
+            "{}\0{}\0{}\0{:?}",
+            request.source,
+            request.title,
+            request.artist,
+            request.duration_ms.map(|ms| ms / 5000)
+        );
+        if !refresh && self.lyric_key.as_deref() == Some(&key) {
             return;
         }
-        let path = Path::new(&media.source).with_extension("lrc");
-        if let Ok(text) = fs::read_to_string(path) {
-            let lyrics = Lyrics::parse(&text);
-            if !lyrics.is_empty() {
-                self.lyrics = Some(lyrics);
+        let same_track = self.lyric_key.as_deref() == Some(&key);
+        self.lyric_key = Some(key.clone());
+        self.lyric_source = request.source.clone();
+        // A manual refresh shouldn't blank an existing lyric screen if the
+        // upstream service has temporarily become unreachable.
+        if !same_track {
+            self.lyrics = None;
+            self.lyric_cursor = 0;
+            self.lyric_follow = true;
+        }
+        self.lyric_pending = true;
+        self.lyric_status = "Finding synchronized lyrics...".into();
+        self.lyric_origin.clear();
+        self.lyric_offset_ms = self.store.lyrics_offset(&request.source).unwrap_or(0);
+        let data_dir = match crate::data_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.message_error(e);
+                return;
+            }
+        };
+        let tx = self.lyric_tx.clone();
+        std::thread::spawn(move || {
+            let result =
+                lyric_source::load(&request, &data_dir, true, refresh).map_err(|e| e.to_string());
+            let _ = tx.send(LyricResponse { key, result });
+        });
+    }
+    fn nudge_lyrics(&mut self, delta_ms: i64) {
+        if self.lyric_key.is_none() {
+            return;
+        }
+        let ms = self
+            .lyric_offset_ms
+            .saturating_add(delta_ms)
+            .clamp(-60_000, 60_000);
+        match self.store.set_lyrics_offset(&self.lyric_source, ms) {
+            Ok(()) => {
+                self.lyric_offset_ms = ms;
+                self.status = format!("Lyrics timing: {:+} ms (saved)", ms);
+            }
+            Err(e) => self.message_error(e),
+        }
+    }
+    fn move_lyric_cursor(&mut self, delta: isize) {
+        let size = match self.lyrics.as_ref() {
+            Some(Document::Synced(lrc)) => lrc.lines().len(),
+            Some(Document::Plain(text)) => text.lines().count(),
+            None => 0,
+        };
+        if size == 0 {
+            return;
+        }
+        let active = self
+            .lyrics
+            .as_ref()
+            .and_then(|doc| match doc {
+                Document::Synced(lrc) => {
+                    lrc.active_index(self.elapsed_ms.unwrap_or(0) - self.lyric_offset_ms)
+                }
+                Document::Plain(_) => None,
+            })
+            .unwrap_or(0);
+        let origin = if self.lyric_follow {
+            active
+        } else {
+            self.lyric_cursor
+        };
+        self.lyric_cursor =
+            (origin as isize + delta).clamp(0, size.saturating_sub(1) as isize) as usize;
+        self.lyric_follow = false;
+    }
+    fn seek_to_lyric(&mut self) {
+        if let Some(Document::Synced(lrc)) = self.lyrics.as_ref()
+            && let Some(position_ms) = lrc.line_position_ms(self.lyric_cursor, self.lyric_offset_ms)
+        {
+            let position_us = position_ms.max(0).saturating_mul(1000);
+            match self.player.seek_absolute(position_us) {
+                Ok(()) => {
+                    self.elapsed_ms = Some(position_ms.max(0));
+                    self.lyric_follow = true;
+                    self.status = "Jumped to selected lyric".into();
+                }
+                Err(e) => self.message_error(e),
             }
         }
     }
@@ -313,7 +465,9 @@ impl App {
             };
             match result {
                 Ok(()) => {
-                    self.find_sidecar(&media);
+                    self.duration_ms = None;
+                    self.mpd = player::mpd_status().ok();
+                    self.load_lyrics(false);
                     self.status = format!(
                         "Playing: {} [{}]",
                         media.title,
@@ -519,6 +673,23 @@ impl App {
                     self.tab = Tab::from_index((c as u8 - b'1') as usize)
                 }
             }
+            KeyCode::Down | KeyCode::Char('j') if self.tab == Tab::Playing => {
+                self.move_lyric_cursor(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.tab == Tab::Playing => {
+                self.move_lyric_cursor(-1)
+            }
+            KeyCode::Enter if self.tab == Tab::Playing => self.seek_to_lyric(),
+            KeyCode::Char('a') if self.tab == Tab::Playing => {
+                self.lyric_follow = true;
+                self.status = "Lyrics auto-follow enabled".into();
+            }
+            KeyCode::Char('L') if self.tab == Tab::Playing => self.load_lyrics(true),
+            KeyCode::Char('[') if self.tab == Tab::Playing => self.nudge_lyrics(-250),
+            KeyCode::Char(']') if self.tab == Tab::Playing => self.nudge_lyrics(250),
+            KeyCode::Char('0') if self.tab == Tab::Playing => {
+                self.nudge_lyrics(-self.lyric_offset_ms)
+            }
             KeyCode::Down | KeyCode::Char('j') => self.choose(1),
             KeyCode::Up | KeyCode::Char('k') => self.choose(-1),
             KeyCode::Char('/') => self.prompt = Some(Prompt::Search(self.search.clone())),
@@ -591,6 +762,30 @@ impl App {
         false
     }
     fn tick(&mut self) {
+        while let Ok(response) = self.lyric_rx.try_recv() {
+            if self.lyric_key.as_deref() != Some(&response.key) {
+                continue;
+            }
+            self.lyric_pending = false;
+            match response.result {
+                Ok(Some(Loaded { document, origin })) => {
+                    let count = match &document {
+                        Document::Synced(lrc) => lrc.lines().len(),
+                        Document::Plain(text) => text.lines().count(),
+                    };
+                    self.lyric_status = format!("{count} lyric lines ready");
+                    self.lyric_origin = origin;
+                    self.lyrics = Some(document);
+                    self.lyric_follow = true;
+                }
+                Ok(None) => {
+                    self.lyric_status = "No matching lyrics found · press L to retry".into();
+                }
+                Err(err) => {
+                    self.lyric_status = format!("Lyrics unavailable: {err}");
+                }
+            }
+        }
         while let Ok(response) = self.download_rx.try_recv() {
             match response.result {
                 Ok(file) => {
@@ -628,9 +823,16 @@ impl App {
                 Err(e) => self.message_error(e),
             }
         }
-        if self.last_tick.elapsed() >= Duration::from_millis(900) {
+        if self.last_tick.elapsed() >= Duration::from_millis(350) {
             self.elapsed_ms = self.player.elapsed_ms();
             self.mpd = player::mpd_status().ok();
+            self.duration_ms = if self.player.engine == Some(Engine::Mpv) {
+                self.player.duration_ms()
+            } else {
+                self.mpd.as_ref().and_then(|s| s.duration_ms)
+            };
+            // Track MPD queue changes and reload lyrics for the current actual file.
+            self.load_lyrics(false);
             self.last_tick = Instant::now();
         }
     }
@@ -913,58 +1115,187 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     let title = if snap.title.is_empty() {
         "Nothing playing"
     } else {
-        &snap.title
+        snap.title.as_str()
     };
-    let creator = &snap.artist;
     let engine = match app.player.engine {
         Some(Engine::Mpv) => "mpv",
         Some(Engine::Mpd) => "MPD",
         None => "MPD / mpv",
     };
-    let state = snap.state;
-    let elapsed = snap.position_us / 1000;
-    let minutes = elapsed.max(0) / 60_000;
-    let seconds = (elapsed.max(0) / 1_000) % 60;
-    let text = format!(
-        "{title}\\n\\n{creator}\\n\\nEngine: {engine}\\nTime: {minutes:02}:{seconds:02}\\nMPD: {state}\\n\\nSpace to pause/resume\\nx to stop · n for next\\n\\nLocal .lrc sidecars are automatically loaded."
-    );
-    frame.render_widget(
-        Paragraph::new(text.replace("\\n", "\n"))
-            .block(panel(" Now playing "))
-            .wrap(Wrap { trim: false }),
-        left,
-    );
-    let mut lyric_lines = Vec::new();
-    if let Some(ref lyrics) = app.lyrics {
-        let (active_index, window) = lyrics.window(elapsed, 4, 6);
-        for (i, line) in window.iter().enumerate() {
-            let style = if Some(i) == active_index {
-                Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(MUTED)
-            };
-            lyric_lines.push(Line::from(Span::styled(
-                format!(
-                    "{} {}",
-                    if Some(i) == active_index { "♫" } else { " " },
-                    line.text
-                ),
-                style,
-            )));
-            lyric_lines.push(Line::raw(""));
-        }
+    let elapsed = (snap.position_us / 1000).max(0);
+    let duration = app
+        .duration_ms
+        .or_else(|| snap.duration_us.map(|t| t / 1000))
+        .unwrap_or(0);
+    let minute = elapsed / 60_000;
+    let second = (elapsed / 1000) % 60;
+    let duration_label = if duration > 0 {
+        format!("{:02}:{:02}", duration / 60_000, (duration / 1000) % 60)
     } else {
-        lyric_lines.push(Line::from("No timed lyrics available for this item."));
-        lyric_lines.push(Line::from(
-            "Add a matching .lrc alongside the local audio file.",
-        ));
-        lyric_lines.push(Line::from("LRCLIB fetch and word-level sync are planned."));
+        "--:--".into()
+    };
+    let info = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(7),
+            Constraint::Length(3),
+            Constraint::Length(5),
+        ])
+        .split(left);
+    let details = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            title,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(snap.artist, Style::default().fg(MUTED))),
+        Line::raw(""),
+        Line::from(format!("♫  {engine}  ·  {}", snap.state)),
+        Line::raw(""),
+        Line::from(format!("  {minute:02}:{second:02} / {duration_label}")),
+    ];
+    frame.render_widget(
+        Paragraph::new(details)
+            .block(panel(" Now Playing "))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        info[0],
+    );
+    let ratio = if duration > 0 {
+        (elapsed as f64 / duration as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    frame.render_widget(
+        Gauge::default()
+            .block(panel(" Playback progress "))
+            .gauge_style(Style::default().fg(ACCENT))
+            .ratio(ratio)
+            .label(format!("{}%", (ratio * 100.0).round() as u8)),
+        info[1],
+    );
+    frame.render_widget(Paragraph::new(
+        "Space play/pause · n next · x stop\n[ / ] timing ±250ms · 0 reset\nj/k browse lyrics · Enter seek · a follow · L refresh")
+        .block(panel(" Lyrics controls ")).wrap(Wrap{trim:true})
+        .style(Style::default().fg(MUTED)),info[2]);
+    draw_lyrics(frame, app, right, elapsed);
+}
+fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
+    let title = if app.lyric_pending {
+        " Lyrics · searching... ".into()
+    } else if app.lyric_origin.is_empty() {
+        " Lyrics ".into()
+    } else {
+        format!(
+            " Lyrics · {} · {:+} ms ",
+            app.lyric_origin, app.lyric_offset_ms
+        )
+    };
+    let Some(doc) = app.lyrics.as_ref() else {
+        let text = format!(
+            "\n\n{}\n\nLocal .lrc files are preferred.\nLRCLIB results are cached offline.\n\nPress L to search again.",
+            app.lyric_status
+        );
+        frame.render_widget(
+            Paragraph::new(text)
+                .block(panel(&title))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(MUTED)),
+            area,
+        );
+        return;
+    };
+    let visible = ((area.height.saturating_sub(2) as usize) / 2).max(3);
+    let mut rendered: Vec<Line> = Vec::new();
+    match doc {
+        Document::Synced(lrc) => {
+            let offset_elapsed = elapsed_ms.saturating_sub(app.lyric_offset_ms);
+            let active = lrc.active_index(offset_elapsed);
+            let center = if app.lyric_follow {
+                active.unwrap_or(0)
+            } else {
+                app.lyric_cursor
+            };
+            let before = visible / 2;
+            let first = center.saturating_sub(before);
+            let last = (first + visible).min(lrc.lines().len());
+            for (idx, line) in lrc.lines()[first..last].iter().enumerate() {
+                let at = first + idx;
+                let distance = at.abs_diff(center);
+                let current = Some(at) == active;
+                let browsed = !app.lyric_follow && at == app.lyric_cursor;
+                let shade = if current {
+                    HIGHLIGHT
+                } else if browsed {
+                    ACCENT
+                } else {
+                    match distance {
+                        0 | 1 => Color::Rgb(172, 186, 181),
+                        2 => Color::Rgb(125, 138, 137),
+                        _ => Color::Rgb(89, 100, 105),
+                    }
+                };
+                let mark = if current {
+                    "♫ "
+                } else if browsed {
+                    "> "
+                } else {
+                    "  "
+                };
+                let style = if current {
+                    Style::default().fg(shade).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(shade)
+                };
+                if current && !line.words.is_empty() {
+                    let time = lrc.timeline_ms(offset_elapsed);
+                    let mut spans = vec![Span::styled(mark, style)];
+                    for word in &line.words {
+                        let sung = word.at_ms <= time;
+                        spans.push(Span::styled(
+                            word.text.clone(),
+                            if sung {
+                                Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(MUTED)
+                            },
+                        ));
+                    }
+                    rendered.push(Line::from(spans));
+                } else {
+                    rendered.push(Line::from(Span::styled(
+                        format!("{mark}{}", line.text),
+                        style,
+                    )));
+                }
+                rendered.push(Line::raw(""));
+            }
+        }
+        Document::Plain(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            let cursor = if app.lyric_follow {
+                0
+            } else {
+                app.lyric_cursor.min(lines.len().saturating_sub(1))
+            };
+            let first = cursor.saturating_sub(visible / 3);
+            for (idx, line) in lines.iter().enumerate().skip(first).take(visible) {
+                let style = if !app.lyric_follow && idx == cursor {
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(MUTED)
+                };
+                rendered.push(Line::from(Span::styled(*line, style)));
+            }
+        }
     }
     frame.render_widget(
-        Paragraph::new(lyric_lines)
-            .block(panel(" Synchronized lyrics "))
-            .wrap(Wrap { trim: false }),
-        right,
+        Paragraph::new(rendered)
+            .block(panel(&title))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        area,
     );
 }
 

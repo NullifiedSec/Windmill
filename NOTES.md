@@ -6,3 +6,4 @@
 2026-10-25 - upstream/, docs/UPSTREAM.md, .gitignore, README.md - Added isolated shallow reference clones and pinned revisions - inspect integrations without vendoring upstream or modifying host packages
 2026-10-25 - feature/windmill-tui-playback - Added ratatui UI, MPD/mpv adapters, public YouTube discovery and linked offline assets - interactive vertical slice; remaining limitations in docs
 2026-10-25 - feature/windmill-mpris - Added one MPRIS D-Bus player with playerctl forwarding to MPD/mpv, metadata, volume, seeking, and silent end-to-end tests - no system package changes or upstream forks
+2026-10-25 - feature/windmill-lyrics - Added LRCLIB auto lookup/private cache, enhanced LRC highlighting, offset controls and lyric navigation - tested live provider and silent TUI

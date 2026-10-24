@@ -2,7 +2,7 @@
 
 **Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Current status: v0.2.1 — desktop media controls + interactive TUI
+## Current status: v0.3.0 — synchronized lyrics and desktop media controls
 
 The Rust terminal interface has five working views:
 
@@ -10,12 +10,12 @@ The Rust terminal interface has five working views:
 - **Discover:** public YouTube search through yt-dlp, performed in a worker thread.
 - **Collections:** any media entry can belong to arbitrarily many user-named collections.
 - **For You:** transparent tag-matching ranks, plus editable tag filters.
-- **Now Playing:** MPD status, mpv IPC playback position, synchronized local .lrc sidecars.
+- **Now Playing:** centered synchronized lyrics, live LRCLIB lookup and offline cache, playback progress, enhanced LRC highlighting and persistent timing correction.
 - **MPRIS:** exposes Windmill to desktop media keys/playerctl, regardless of playback engine.
 
 The CLI and TUI support user-initiated offline audio/video downloads. Downloaded files are linked to their original media entry as assets instead of duplicating it.
 
-**Not finished:** no dedicated YouTube Music browsing backend, rich cover art, online lyrics fetching, word-level karaoke, unified queue, or persistent download-progress dashboard. Actual downloading and audible playback still need end-to-end testing.
+**Not finished:** no dedicated YouTube Music browsing backend, rich cover art, unified queue, or persistent download-progress dashboard. Actual downloading and audible playback still need end-to-end testing.
 
 ## Run on the development workstation
 
@@ -49,6 +49,10 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `Space`, `n`, `x` | Pause/resume, next, stop |
 | `r` | Reload local catalog |
 | `q` | Quit (also closes mpv launched by Windmill) |
+| `[` / `]` | Lyrics earlier/later in 250 ms steps (Now Playing) |
+| `0` | Reset lyric offset (Now Playing) |
+| `j/k`, Enter | Browse lyric lines and seek to selected timed line (Now Playing) |
+| `a` / `L` | Auto-follow / refresh LRCLIB lookup (Now Playing) |
 
 MPD must be running (`systemctl --user start mpd.service`). The configured MPD library root is `~/Music`. Files outside MPD's music directory remain playable using mpv.
 
@@ -100,6 +104,6 @@ cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 ~~~
 
-See [architecture](docs/ARCHITECTURE.md), [roadmap](docs/ROADMAP.md), [user MPD setup](docs/MPD-SETUP.md), and [upstream references](docs/UPSTREAM.md).
+See [lyrics](docs/LYRICS.md), [architecture](docs/ARCHITECTURE.md), [roadmap](docs/ROADMAP.md), [user MPD setup](docs/MPD-SETUP.md), and [upstream references](docs/UPSTREAM.md).
 
 No Google login is required for public discovery, but online activity is **not anonymous**. Downloads depend on provider availability and should only be used where permitted. Windmill never scrapes or downloads automatically on import.

@@ -24,6 +24,10 @@ impl Store {
               media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
               tag TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(media_id,tag)
             );
+            CREATE TABLE IF NOT EXISTS lyric_offsets (
+              source TEXT PRIMARY KEY,
+              offset_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS assets (
               media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
               kind TEXT NOT NULL CHECK(kind IN ('audio','video')),
@@ -105,6 +109,29 @@ impl Store {
             [source],
             |r| r.get(0),
         )
+    }
+    pub fn lyrics_offset(&self, source: &str) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT offset_ms FROM lyric_offsets WHERE source=?1",
+                [source],
+                |r| r.get(0),
+            )
+            .or_else(|e| {
+                if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            })
+    }
+    pub fn set_lyrics_offset(&self, source: &str, ms: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO lyric_offsets(source,offset_ms) VALUES(?1,?2)
+            ON CONFLICT(source) DO UPDATE SET offset_ms=excluded.offset_ms",
+            params![source, ms],
+        )?;
+        Ok(())
     }
     pub fn asset(&self, id: i64, kind: &str) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
@@ -238,6 +265,20 @@ mod tests {
         assert_eq!(s.collections().unwrap(), vec!["My Mood"]);
         assert!(s.has("some-path.mp3").unwrap());
         assert!(!s.has("missing").unwrap());
+    }
+    #[test]
+    fn lyric_adjustment_persists_without_modifying_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("windmill.db");
+        {
+            let store = Store::open(&db).unwrap();
+            assert_eq!(store.lyrics_offset("file.flac").unwrap(), 0);
+            store.set_lyrics_offset("file.flac", 375).unwrap();
+            store.set_lyrics_offset("video", -500).unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.lyrics_offset("file.flac").unwrap(), 375);
+        assert_eq!(store.lyrics_offset("video").unwrap(), -500);
     }
     #[test]
     fn most_used_tags_are_stable_and_local() {

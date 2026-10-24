@@ -9,7 +9,8 @@ Windmill owns the **catalog and user experience**. MPD and mpv remain unmodified
 - `src/youtube.rs`: public yt-dlp search, strict video ID validation and canonical YouTube URLs.
 - `src/download.rs`: user-initiated audio/video downloads via subprocess argument arrays, output-path verification and managed downloads.
 - `src/player.rs`: native MPD TCP protocol, mpv child management and IPC playback-position lookup; one active playback engine at a time.
-- `src/lyrics.rs`: basic line-timed LRC parser with offsets and active-line lookup; local sidecar support.
+- `src/lyrics.rs`: LRC and enhanced per-word timestamp parsing, document and user offsets.
+- `src/lyric_source.rs`: local sidecars, private cache and verified LRCLIB lookup on a worker thread.
 - `src/main.rs`: CLI commands and default TUI entrypoint.
 
 ## Catalog identity
