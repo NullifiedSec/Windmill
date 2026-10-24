@@ -1,0 +1,7 @@
+/target/
+/.tools/
+/.env
+*.db
+*.db-shm
+*.db-wal
+/upstream/

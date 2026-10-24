@@ -1,0 +1,6 @@
+2026-10-25 - project - Initialized Windmill in Documents - local-first media center foundation, no upstream fork
+2026-10-25 - src - Implemented local catalog and CLI, deterministic recommender, integrations - first verifiable vertical slice
+2026-10-25 - docs - Recorded architecture, scope and roadmap - preserve intent and non-obvious decisions
+2026-10-25 - src/lyrics.rs, src/main.rs - Added LRC parser and timestamped lyric preview - foundation for player-neutral synchronized lyrics
+2026-10-25 - docs/MPD-SETUP.md - Documented user-scoped MPD/PipeWire configuration and localhost endpoint - reproducible integration without system service
+2026-10-25 - upstream/, docs/UPSTREAM.md, .gitignore, README.md - Added isolated shallow reference clones and pinned revisions - inspect integrations without vendoring upstream or modifying host packages
