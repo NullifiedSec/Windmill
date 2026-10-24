@@ -2,7 +2,7 @@
 
 **Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Current status: v0.3.2 — one-tap lyric synchronization
+## Current status: v0.3.3 — easy timeline seeking and one-tap lyric sync
 
 The Rust terminal interface has five working views:
 
@@ -46,6 +46,13 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `t` | Tag a library item |
 | `c` | Create/add to a collection |
 | `f` | Filter For You with comma-separated tags |
+| `←` / `→` | Skip backward/forward 5 seconds |
+| `Shift+←` / `Shift+→` | Skip backward/forward 30 seconds |
+| `Ctrl+←` / `Ctrl+→` (or PageUp/PageDown) | Skip backward/forward 60 seconds |
+| `g` | Jump to a specific time (e.g. `1:23.5` or `83.5`) |
+| `Home` / `End` | Jump to start / near end |
+| `z` | Undo the last skip or progress-bar click |
+| Mouse click on Now Playing progress bar | Seek to the chosen position |
 | `Space`, `n`, `x` | Pause/resume, next, stop |
 | `r` | Reload local catalog |
 | `q` | Quit (also closes mpv launched by Windmill) |
@@ -60,6 +67,17 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `a` / `L` | Auto-follow / refresh LRCLIB lookup (Now Playing) |
 
 MPD must be running (`systemctl --user start mpd.service`). The configured MPD library root is `~/Music`. Files outside MPD's music directory remain playable using mpv.
+
+### Replay and skip sections
+
+Press **Left/Right** for five-second skips, Shift+arrows for 30 seconds,
+or Ctrl+arrows for 60 seconds. Press `g` and enter `2:15` (or `135`) to
+jump directly. In **Now Playing**, click on the progress bar to seek.
+
+**Overshot? Press `z` to undo** the last jump and return to your
+previous playback position. The keyboard shortcuts work while Windmill's
+terminal has focus; mouse seeking needs a known track duration.
+In Tap Sync mode, Space remains a lyric marker rather than pause.
 
 ### Tap to Sync — find the offset by ear
 

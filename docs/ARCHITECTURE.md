@@ -9,6 +9,7 @@ Windmill owns the **catalog and user experience**. MPD and mpv remain unmodified
 - `src/youtube.rs`: public yt-dlp search, strict video ID validation and canonical YouTube URLs.
 - `src/download.rs`: user-initiated audio/video downloads via subprocess argument arrays, output-path verification and managed downloads.
 - `src/player.rs`: native MPD TCP protocol, mpv child management and IPC playback-position lookup; one active playback engine at a time.
+- `src/seek.rs`: timestamp parsing, bounded seek targets, mouse progress geometry.
 - `src/lyric_offset.rs`: input validation, signed offsets, and pure Tap Sync cue calculation from current player time and lyric timestamp.
 - `src/lyrics.rs`: LRC and enhanced per-word timestamp parsing, document and user offsets.
 - `src/lyric_source.rs`: local sidecars, private cache and verified LRCLIB lookup on a worker thread.
@@ -52,3 +53,12 @@ LRC document offset. The corrected timing is persisted under the source
 identity in SQLite, without seeking or pausing playback. Cancelling the
 mode has no storage side effects. Plain-lyrics records cannot enter this
 mode because no trustworthy timestamp is available.
+
+
+## Timeline seeking
+
+Terminal key and mouse events become absolute seeks through the existing
+MPD or mpv playback adapter. The previous position is held in a
+track-scoped, one-step undo. The progress bar's rectangle is calculated
+using the same Ratatui layout constraints as the renderer. Backend
+errors, including mpv JSON IPC errors, are surfaced to the user.

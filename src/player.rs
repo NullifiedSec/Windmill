@@ -213,7 +213,13 @@ impl Playback {
         stream.write_all(&payload)?;
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line)?;
-        Ok(serde_json::from_str(&line)?)
+        let response: Value = serde_json::from_str(&line)?;
+        if let Some(error) = response.get("error").and_then(Value::as_str)
+            && error != "success"
+        {
+            return Err(format!("mpv rejected playback command: {error}").into());
+        }
+        Ok(response)
     }
     pub fn toggle(&mut self) -> Result<()> {
         match self.engine {
@@ -313,7 +319,9 @@ impl Playback {
             Some(Engine::Mpd) => {
                 mpd_request(&[&format!("seekcur {seconds:+.6}")])?;
             }
-            None => {}
+            None => {
+                mpd_request(&[&format!("seekcur {seconds:+.6}")])?;
+            }
         }
         Ok(())
     }
@@ -329,7 +337,9 @@ impl Playback {
             Some(Engine::Mpd) => {
                 mpd_request(&[&format!("seekcur {seconds:.6}")])?;
             }
-            None => {}
+            None => {
+                mpd_request(&[&format!("seekcur {seconds:.6}")])?;
+            }
         }
         Ok(())
     }

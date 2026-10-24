@@ -5,11 +5,15 @@ use crate::{
     lyric_source::{self, Document, Loaded, Request},
     mpris::{self, Control, Snapshot},
     player::{self, Engine, Playback, Status},
+    seek::{self, clamp_target, format_time, parse_time_ms},
     store::{Media, Store},
     youtube::{self, Video},
 };
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -76,6 +80,7 @@ enum Prompt {
     Collection(String),
     Filter(String),
     LyricOffset(String),
+    JumpTime(String),
 }
 impl Prompt {
     fn text(&self) -> &str {
@@ -84,7 +89,8 @@ impl Prompt {
             | Self::Tag(t)
             | Self::Collection(t)
             | Self::Filter(t)
-            | Self::LyricOffset(t) => t,
+            | Self::LyricOffset(t)
+            | Self::JumpTime(t) => t,
         }
     }
     fn text_mut(&mut self) -> &mut String {
@@ -93,7 +99,8 @@ impl Prompt {
             | Self::Tag(t)
             | Self::Collection(t)
             | Self::Filter(t)
-            | Self::LyricOffset(t) => t,
+            | Self::LyricOffset(t)
+            | Self::JumpTime(t) => t,
         }
     }
     fn label(&self) -> &str {
@@ -103,6 +110,7 @@ impl Prompt {
             Self::Collection(_) => "Create & add collection",
             Self::Filter(_) => "Recommendation tags, comma-separated",
             Self::LyricOffset(_) => "Lyrics offset (+seconds or -mm:ss.sss) — Enter saves",
+            Self::JumpTime(_) => "Jump to playback time (seconds, m:ss, h:mm:ss)",
         }
     }
 }
@@ -145,6 +153,7 @@ pub struct App {
     lyric_follow: bool,
     tap_sync: bool,
     sync_undo: Option<(String, i64)>,
+    seek_undo: Option<(String, i64)>,
     lyric_pending: bool,
     lyric_tx: Sender<LyricResponse>,
     lyric_rx: Receiver<LyricResponse>,
@@ -190,6 +199,7 @@ impl App {
             lyric_follow: true,
             tap_sync: false,
             sync_undo: None,
+            seek_undo: None,
             lyric_pending: false,
             lyric_tx,
             lyric_rx,
@@ -543,6 +553,97 @@ impl App {
             }
         }
     }
+    fn playback_clock(&mut self) -> Option<i64> {
+        if self.player.engine.is_some() {
+            self.player.elapsed_ms()
+        } else {
+            player::mpd_status()
+                .ok()
+                .filter(|s| s.file.is_some())
+                .map(|s| s.elapsed_ms)
+        }
+    }
+    fn seek_to(&mut self, target_ms: i64) {
+        let snap = self.mpris_snapshot();
+        if !snap.can_seek || snap.source.is_empty() {
+            self.status = "Start a playable track before seeking".into();
+            return;
+        }
+        let Some(previous) = self.playback_clock() else {
+            self.status =
+                "Playback position unavailable; try again after starting the player".into();
+            return;
+        };
+        let duration = self.player.duration_ms().or(self.duration_ms);
+        let target = clamp_target(target_ms, 0, duration);
+        if (target - previous).abs() < 100 {
+            return;
+        }
+        match self.player.seek_absolute(target.saturating_mul(1000)) {
+            Ok(()) => {
+                self.seek_undo = Some((snap.source, previous));
+                self.elapsed_ms = Some(target);
+                if !self.tap_sync {
+                    self.lyric_follow = true
+                }
+                self.status = format!(
+                    "Jumped to {} (from {}) · z to undo",
+                    format_time(target),
+                    format_time(previous)
+                );
+                self.last_tick = Instant::now() - Duration::from_secs(2);
+            }
+            Err(e) => self.message_error(e),
+        }
+    }
+    fn skip_by(&mut self, delta_ms: i64) {
+        let Some(now) = self.playback_clock() else {
+            self.status = "Start playback before skipping".into();
+            return;
+        };
+        let duration = self.player.duration_ms().or(self.duration_ms);
+        self.seek_to(clamp_target(now, delta_ms, duration));
+    }
+    fn undo_seek(&mut self) {
+        let Some((source, previous)) = self.seek_undo.take() else {
+            self.status = "No previous skip to undo".into();
+            return;
+        };
+        let snap = self.mpris_snapshot();
+        if source != snap.source || !snap.can_seek {
+            self.status = "Can't undo a skip from another track".into();
+            return;
+        }
+        match self.player.seek_absolute(previous.saturating_mul(1000)) {
+            Ok(()) => {
+                self.elapsed_ms = Some(previous);
+                self.lyric_follow = true;
+                self.status = format!("Skip undone · back at {}", format_time(previous));
+                self.last_tick = Instant::now() - Duration::from_secs(2);
+            }
+            Err(e) => {
+                self.seek_undo = Some((source, previous));
+                self.message_error(e)
+            }
+        }
+    }
+    fn mouse(&mut self, event: MouseEvent, area: Rect) {
+        if self.tab != Tab::Playing || self.prompt.is_some() {
+            return;
+        }
+        if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        let progress = progress_area(area);
+        if event.row < progress.y || event.row >= progress.y.saturating_add(progress.height) {
+            return;
+        }
+        let duration = self.player.duration_ms().or(self.duration_ms).unwrap_or(0);
+        match seek::progress_target(event.column, progress.x, progress.width, duration) {
+            Some(target) => self.seek_to(target),
+            None => self.status = "Click the progress bar when the track duration is known".into(),
+        }
+    }
     fn download(&mut self, kind: Kind) {
         let Some(media) = self.active_media() else {
             self.status = "Select media to download first".into();
@@ -617,6 +718,7 @@ impl App {
             match result {
                 Ok(()) => {
                     self.tap_sync = false;
+                    self.seek_undo = None;
                     self.duration_ms = None;
                     self.mpd = player::mpd_status().ok();
                     self.load_lyrics(false);
@@ -680,6 +782,10 @@ impl App {
                     Err(e) => self.message_error(e),
                 }
             }
+            Prompt::JumpTime(value) => match parse_time_ms(&value) {
+                Ok(ms) => self.seek_to(ms),
+                Err(error) => self.status = format!("Invalid seek time: {error}"),
+            },
             Prompt::LyricOffset(value) => match parse_offset_ms(&value) {
                 Ok(ms) => self.set_lyric_offset(ms),
                 Err(problem) => self.status = format!("Invalid lyrics offset: {problem}"),
@@ -832,6 +938,32 @@ impl App {
             KeyCode::Char(' ') | KeyCode::Enter if self.tab == Tab::Playing && self.tap_sync => {
                 self.tap_lyric_now()
             }
+            KeyCode::Left => self.skip_by(if key.modifiers.contains(KeyModifiers::CONTROL) {
+                -60_000
+            } else if key.modifiers.contains(KeyModifiers::SHIFT) {
+                -30_000
+            } else {
+                -5_000
+            }),
+            KeyCode::Right => self.skip_by(if key.modifiers.contains(KeyModifiers::CONTROL) {
+                60_000
+            } else if key.modifiers.contains(KeyModifiers::SHIFT) {
+                30_000
+            } else {
+                5_000
+            }),
+            KeyCode::PageUp => self.skip_by(-60_000),
+            KeyCode::PageDown => self.skip_by(60_000),
+            KeyCode::Home => self.seek_to(0),
+            KeyCode::End => {
+                if let Some(duration) = self.player.duration_ms().or(self.duration_ms) {
+                    self.seek_to(duration.saturating_sub(1000))
+                } else {
+                    self.status = "This track has no known duration".into()
+                }
+            }
+            KeyCode::Char('g') => self.prompt = Some(Prompt::JumpTime(String::new())),
+            KeyCode::Char('z') => self.undo_seek(),
             KeyCode::Tab => self.tab = Tab::from_index(self.tab.index() + 1),
             KeyCode::BackTab => self.tab = Tab::from_index(self.tab.index() + 4),
             KeyCode::Char('1'..='5') => {
@@ -919,6 +1051,7 @@ impl App {
             }
             KeyCode::Char('x') => {
                 self.tap_sync = false;
+                self.seek_undo = None;
                 self.player.stop();
                 self.elapsed_ms = None;
                 self.status = "Playback stopped".into();
@@ -1017,7 +1150,7 @@ struct Screen;
 impl Screen {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen) {
+        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture) {
             let _ = disable_raw_mode();
             return Err(Box::new(e));
         }
@@ -1027,7 +1160,7 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     }
 }
 
@@ -1059,11 +1192,16 @@ pub fn run(store: Store) -> Result<()> {
             }
         }
         terminal.draw(|f| draw(f, &app))?;
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && app.key(key)
-        {
-            break;
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if app.key(key) {
+                        break;
+                    }
+                }
+                Event::Mouse(mouse) => app.mouse(mouse, terminal.size()?.into()),
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -1113,7 +1251,7 @@ fn draw(frame: &mut Frame, app: &App) {
             .wrap(Wrap { trim: true }),
         layout[2],
     );
-    frame.render_widget(Paragraph::new("1-5 tabs · j/k select · / search · p play · m MPD · d audio download · v video download · s save · t tag · c collect · space pause · q quit")
+    frame.render_widget(Paragraph::new("←/→ ±5s · Shift+←/→ ±30s · g jump · z undo · click progress · 1-5 tabs · / search · Space pause · q quit")
         .style(Style::default().fg(MUTED)).block(panel(" Keys ")),layout[3]);
 }
 fn select_list(
@@ -1286,6 +1424,30 @@ fn draw_recommendations(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         right,
     );
 }
+fn progress_area(area: Rect) -> Rect {
+    let main = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(7),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(area);
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .split(main[1]);
+    let panels = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(7),
+            Constraint::Length(3),
+            Constraint::Length(7),
+        ])
+        .split(halves[0]);
+    panels[1]
+}
 fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     let snap = app.mpris_snapshot();
     let title = if snap.title.is_empty() {
@@ -1367,7 +1529,7 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
             "SELECTED: {cue}\n↑/↓ or j/k choose another lyric\nSPACE / Enter = TAP when you HEAR it\nEsc = cancel without changing offset"
         )
     } else {
-        "s TAP TO SYNC · o exact · [ / ] ±250ms\nSpace pause · n next · x stop\nj/k browse · Enter seek · a follow\nu undo last tap · 0 reset · L refresh".into()
+        "←/→ ±5s · Shift+arrows ±30s\ng jump · z undo skip · click progress\ns TAP SYNC · o lyric offset · Space pause\nj/k lyrics · Enter line · u undo tap".into()
     };
     frame.render_widget(
         Paragraph::new(controls)

@@ -45,3 +45,11 @@ PTY test in `tests/lyrics_integration.py` enters `s` mode, taps Space at
 the live cue, verifies the stored offset is nonzero, presses `u` to
 restore the old value, then verifies the original precise-offset
 and seek controls still function.
+
+
+## Timeline seeking
+
+The `src/seek.rs` tests cover timestamp expressions and progress-bar
+coordinates. `tests/mpris_integration.py` sends real arrow and mouse
+events to silent MPD/mpv, tests a jump to timestamp, and verifies `z`
+restores previous playback positions.

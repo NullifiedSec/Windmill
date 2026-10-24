@@ -134,6 +134,13 @@ def main():
             ctl("position", "3")
             capture(master, tui, screen, .5)
             assert 2.9 <= float(ctl("position")) <= 5.0
+            # Windmill terminal arrows use the MPD clock; z returns to pre-skip.
+            os.write(master,b"\x1b[C")
+            capture(master,tui,screen,.4)
+            assert 8 <= float(ctl("position")) <= 11, "MPD right arrow did not skip 5 seconds"
+            os.write(master,b"z")
+            capture(master,tui,screen,.4)
+            assert 2.9 <= float(ctl("position")) <= 5.5, "MPD skip undo failed"
             # A second MPD queue item must update actual track metadata on Next.
             assert run("mpc", "-h", "127.0.0.1", "-p", str(port),
                        "add", "second.wav").returncode == 0
@@ -173,6 +180,23 @@ def main():
                     break
             else:
                 raise AssertionError(f"mpv position did not converge after seek: {observed}; status={ctl('status')}")
+            # Jump to an exact timestamp without going through playerctl.
+            os.write(master,b"g0:12\r")
+            capture(master,tui,screen,.6)
+            assert 11.8<=float(ctl("position"))<=14.0, "mpv jump-to-time failed"
+            os.write(master,b"z")
+            capture(master,tui,screen,.6)
+            assert 1.8<=float(ctl("position"))<=7.0, "mpv seek undo failed"
+            # Click the progress bar's midpoint in an 110x35 terminal.
+            # Ratatui progress region is in the left half around row 20.
+            os.write(master,b"\x1b[<0;32;21M")
+            capture(master,tui,screen,.6)
+            assert 7.0<=float(ctl("position"))<=14.5, (
+                f"mpv mouse progress click failed: {ctl('position')}"
+            )
+            os.write(master,b"z")
+            capture(master,tui,screen,.5)
+            assert 1.8<=float(ctl("position"))<=8.0, "mpv mouse click undo failed"
             ctl("stop")
             capture(master,tui,screen,.4)
             assert ctl("status")=="Stopped"
@@ -180,7 +204,7 @@ def main():
             assert tui.wait(timeout=3) == 0
             assert b"Error:" not in screen, "The TUI reported an operation error"
             assert "windmill" not in run("playerctl", "-l", env=env).stdout.splitlines()
-            print("PASS: MPD + mpv MPRIS: discovery, metadata, play/pause, volume, seek, next/previous, stop, cleanup")
+            print("PASS: MPD/mpv: MPRIS and terminal arrows, jump-to-time, mouse progress seek and undo")
         finally:
             if tui is not None and tui.poll() is None:
                 tui.terminate()
