@@ -39,6 +39,19 @@ pub fn parse_offset_ms(input: &str) -> Result<i64, &'static str> {
     Ok(offset.clamp(-MAX_ABS_OFFSET_MS, MAX_ABS_OFFSET_MS))
 }
 
+/// Calculate the shift that places a chosen lyric timestamp at the observed
+/// player position. Both inputs include document-level LRC offset already;
+/// user-entered timing shifts must NOT be added again.
+pub fn offset_from_cue(playback_ms: i64, base_lyric_ms: i64) -> Result<i64, &'static str> {
+    if playback_ms < 0 {
+        return Err("Playback position is unavailable");
+    }
+    let delta = i128::from(playback_ms) - i128::from(base_lyric_ms);
+    if delta.abs() > i128::from(MAX_ABS_OFFSET_MS) {
+        return Err("Cue is more than 60 minutes away from the lyric line");
+    }
+    Ok(delta as i64)
+}
 pub fn format_offset_ms(ms: i64) -> String {
     let sign = if ms < 0 { '-' } else { '+' };
     let abs = ms.unsigned_abs();
@@ -76,6 +89,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tap_to_sync_positive_and_negative_cues() {
+        assert_eq!(offset_from_cue(14_450, 1_950), Ok(12_500));
+        assert_eq!(offset_from_cue(800, 2_050), Ok(-1_250));
+        assert_eq!(offset_from_cue(1_000, 1_000), Ok(0));
+        assert!(offset_from_cue(5_000_000, 10).is_err());
+        assert!(offset_from_cue(-1, 1_000).is_err());
+    }
     #[test]
     fn displayed_values_round_trip() {
         for value in [0, 12_500, -3_250, 3_600_000, -3_600_000] {

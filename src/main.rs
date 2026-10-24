@@ -22,7 +22,7 @@ fn data_dir() -> Result<PathBuf> {
 }
 fn usage() {
     println!(
-        "Windmill 0.3.1 — local-first media center\n\
+        "Windmill 0.3.2 — local-first media center\n\
     ui | tui                  # launch terminal media center (default)\n\
     add <path-or-url> <title> <creator>\n\
     list | tag <id> <tag> | untag <id> <tag>\n\

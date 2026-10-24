@@ -1,4 +1,4 @@
-# Windmill lyrics (v0.3.1)
+# Windmill lyrics (v0.3.2)
 
 ## Source priority
 
@@ -12,6 +12,10 @@ Windmill uses TLS-verified curl with timeouts, response-size limits, and no Goog
 
 | Key | Action |
 |---|---|
+| `s` | Toggle guided Tap Sync mode |
+| `Space` / `Enter` | During Tap Sync, mark the start of the selected lyric at the current live playback time |
+| `Esc` | Cancel Tap Sync before marking |
+| `u` | Undo the previous successful Tap Sync correction |
 | `o` | Set precise offset, e.g. `+12.5` seconds or `-00:03.250` |
 | `[` | Advance lyrics 250 ms |
 | `]` | Delay lyrics 250 ms |
@@ -21,7 +25,29 @@ Windmill uses TLS-verified curl with timeouts, response-size limits, and no Goog
 | `a` | Return to auto-follow |
 | `L` | Refresh lookup manually |
 
-**Example:** A music video with a 13-second spoken intro needs `+13`.
+### Guided Tap Sync (recommended)
+
+With the song playing, press `s` in Now Playing. Windmill chooses the
+first nonempty timestamped lyric line; select a different one using
+`j/k` or the arrow keys. **Press Space at the instant you hear the selected
+line begin.** Enter can also mark. This does not pause or seek the song.
+
+Windmill reads a fresh timestamp from MPD/mpv, then computes:
+
+`new_offset_ms = live_playback_position_ms − (LRC_timestamp_ms + LRC_document_offset_ms)`
+
+It persists the correction under the media source ID. When a video contains
+a long intro, the resulting offset is positive; negative offsets work too.
+The selected line remains fixed during marking even while the currently
+active lyric changes. Windmill visually distinguishes it with `◎`.
+Use `u` to restore the previous offset, or `Esc` to cancel before tapping.
+Tap Sync requires timed LRC; plain lyrics cannot be synchronized by
+guessing timestamps.
+
+A human keyboard tap and player IPC have some latency. You can refine
+afterward with `[`/`]` in 250 ms steps, or enter a precise value with `o`.
+
+**Manual alternative:** A music video with a 13-second spoken intro needs `+13`.
 Press `o` and enter `+13` or `+00:13.000`. This delays the lyrics,
 without skipping video content. `-2.5` displays lyrics 2.5 seconds earlier.
 

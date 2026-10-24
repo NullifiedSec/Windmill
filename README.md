@@ -2,7 +2,7 @@
 
 **Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Current status: v0.3.1 — precise per-video lyrics offsets
+## Current status: v0.3.2 — one-tap lyric synchronization
 
 The Rust terminal interface has five working views:
 
@@ -49,6 +49,10 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `Space`, `n`, `x` | Pause/resume, next, stop |
 | `r` | Reload local catalog |
 | `q` | Quit (also closes mpv launched by Windmill) |
+| `s` | Start/exit guided Tap Sync (Now Playing) |
+| `Space` / `Enter` | In Tap Sync mode, mark the moment you hear the selected lyric |
+| `Esc` | Cancel Tap Sync without changing the offset |
+| `u` | Undo the most recent successful Tap Sync mark |
 | `o` | Set exact signed lyrics offset (e.g. `+12.5` or `-00:03.250`) |
 | `[` / `]` | Lyrics earlier/later in 250 ms steps (Now Playing) |
 | `0` | Reset lyric offset (Now Playing) |
@@ -56,6 +60,20 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `a` / `L` | Auto-follow / refresh LRCLIB lookup (Now Playing) |
 
 MPD must be running (`systemctl --user start mpd.service`). The configured MPD library root is `~/Music`. Files outside MPD's music directory remain playable using mpv.
+
+### Tap to Sync — find the offset by ear
+
+Play a song or music video, open Now Playing (`5`), and press `s` to enter
+**Tap Sync**. Windmill highlights the first sung lyric by default; use `j/k`
+to pick any unmistakable lyric line. **Press Space when you hear that line
+start**. This marks the current live MPD/mpv playback position as the timestamp
+for that lyric, calculates the exact offset, and persists it. Playback
+continues during marking. `u` restores your previous offset; `Esc` cancels
+without changing it.
+
+No need to estimate intro lengths. For finer control, `[` / `]` still
+adjust the result by 250 ms. This requires synchronized LRC/lyrics, not
+plain untimed text.
 
 ### Music-video lyric timing
 

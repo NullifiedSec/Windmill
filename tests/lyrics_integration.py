@@ -80,6 +80,28 @@ def main():
             assert b"Local .lrc" in data, "Local lyrics not loaded in TUI"
             assert b"The windmill turns" in data, "Synced lyric line not rendered"
             assert b"Lyrics controls" in data, "Lyrics controls pane absent"
+            # Enter guided sync; press SPACE as the first sung line begins.
+            os.write(master,b"s")
+            capture(master, process, data, .15)
+            assert b"TAP SYNC" in data, "Guided lyric sync instructions not rendered"
+            os.write(master,b" ")
+            capture(master, process, data, .25)
+            with sqlite3.connect(root / "profile" / "library.db") as con:
+                marker=con.execute(
+                    "SELECT offset_ms FROM lyric_offsets WHERE source=?",
+                    (str(music),)
+                ).fetchone()
+            assert marker is not None and 500 < marker[0] < 8_000, (
+                f"Tap Sync did not mark the current playback position: {marker}"
+            )
+            os.write(master,b"u")
+            capture(master, process, data, .25)
+            with sqlite3.connect(root / "profile" / "library.db") as con:
+                reverted=con.execute(
+                    "SELECT offset_ms FROM lyric_offsets WHERE source=?",
+                    (str(music),)
+                ).fetchone()
+            assert reverted==(0,),f"Undo didn't restore zero offset: {reverted}"
             os.write(master, b"]")
             capture(master, process, data, .5)
             offset = sqlite3.connect(root / "profile" / "library.db").execute(
@@ -107,7 +129,7 @@ def main():
             os.write(master, b"q")
             assert process.wait(timeout=5) == 0
             assert b"Error:" not in data, "TUI reported error during lyric seek/follow"
-            print("PASS: local lyrics, exact 12.5s intro offset, fine tuning, line navigation, seek, auto-follow, clean exit")
+            print("PASS: Tap Sync with SPACE and undo, exact offset, fine tuning, line navigation, seek, auto-follow, clean exit")
         finally:
             if process.poll() is None:
                 process.terminate()

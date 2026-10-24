@@ -11,6 +11,7 @@
 - [x] Native MPD status/control and local library playback; mpv with IPC time-position.
 - [x] Local .lrc synchronized lyrics, private LRCLIB cache, manual correction, plain fallback and enhanced LRC word highlighting.
 - [x] Precise per-video lyrics offset editor, stream/offline identity and music-video intro/outro duration handling.
+- [x] Guided Tap Sync workflow: select timestamped lyric, mark current player position without pausing, persisted shift and undo.
 - [x] Single MPRIS identity for MPD and mpv, including playerctl controls, metadata, volume and seek.
 - [x] Rust unit tests and pseudo-terminal rendering/search/save tests.
 

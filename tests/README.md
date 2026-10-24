@@ -35,3 +35,13 @@ user's library, audio devices, or online sources.
 `tests/lyrics_integration.py` also enters an exact offset with `o` then
 fine-tunes with `[`. Parser tests cover decimal seconds, mm:ss.sss,
 invalid text and out-of-range offsets.
+
+## Guided Tap Sync regression
+
+The offline Rust tests cover positive/negative cue offsets, preserving LRC
+document offsets, skipping blank first lines, choosing a later line,
+persistence/undo, out-of-range rejection and cancellation. The silent
+PTY test in `tests/lyrics_integration.py` enters `s` mode, taps Space at
+the live cue, verifies the stored offset is nonzero, presses `u` to
+restore the old value, then verifies the original precise-offset
+and seek controls still function.

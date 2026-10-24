@@ -8,3 +8,4 @@
 2026-10-25 - feature/windmill-mpris - Added one MPRIS D-Bus player with playerctl forwarding to MPD/mpv, metadata, volume, seeking, and silent end-to-end tests - no system package changes or upstream forks
 2026-10-25 - feature/windmill-lyrics - Added LRCLIB auto lookup/private cache, enhanced LRC highlighting, offset controls and lyric navigation - tested live provider and silent TUI
 2026-10-25 - feature/lyrics-video-offset - Implemented precise video lyric shift via o prompt, shared online/offline identity, previous offset migration and music-video runtime mismatch handling - verified with isolated video and lyrics tests
+2026-10-25 - feature/lyrics-tap-sync - Added guided listen-and-tap lyric alignment, live MPD/mpv clock capture, persisted offset, undo and cancel - verified with silent PTY and unit tests

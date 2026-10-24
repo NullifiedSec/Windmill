@@ -1,7 +1,7 @@
 //! Interactive Windmill terminal front end. No application-specific background daemon.
 use crate::{
     download::{self, Kind},
-    lyric_offset::{MAX_ABS_OFFSET_MS, format_offset_ms, parse_offset_ms},
+    lyric_offset::{MAX_ABS_OFFSET_MS, format_offset_ms, offset_from_cue, parse_offset_ms},
     lyric_source::{self, Document, Loaded, Request},
     mpris::{self, Control, Snapshot},
     player::{self, Engine, Playback, Status},
@@ -143,6 +143,8 @@ pub struct App {
     lyric_offset_ms: i64,
     lyric_cursor: usize,
     lyric_follow: bool,
+    tap_sync: bool,
+    sync_undo: Option<(String, i64)>,
     lyric_pending: bool,
     lyric_tx: Sender<LyricResponse>,
     lyric_rx: Receiver<LyricResponse>,
@@ -186,6 +188,8 @@ impl App {
             lyric_offset_ms: 0,
             lyric_cursor: 0,
             lyric_follow: true,
+            tap_sync: false,
+            sync_undo: None,
             lyric_pending: false,
             lyric_tx,
             lyric_rx,
@@ -320,6 +324,7 @@ impl App {
         let Some(request) = self.current_lyric_request() else {
             self.lyrics = None;
             self.lyric_key = None;
+            self.tap_sync = false;
             self.lyric_status = "Nothing playing".into();
             self.lyric_pending = false;
             return;
@@ -340,6 +345,7 @@ impl App {
         // A manual refresh shouldn't blank an existing lyric screen if the
         // upstream service has temporarily become unreachable.
         if !same_track {
+            self.tap_sync = false;
             self.lyrics = None;
             self.lyric_cursor = 0;
             self.lyric_follow = true;
@@ -385,6 +391,114 @@ impl App {
     }
     fn nudge_lyrics(&mut self, delta_ms: i64) {
         self.set_lyric_offset(self.lyric_offset_ms.saturating_add(delta_ms));
+    }
+    /// Begin guided sync, picking the first meaningful line as the default
+    /// cue. Nothing is persisted until the listener taps at the heard moment.
+    fn toggle_tap_sync(&mut self) {
+        if self.tap_sync {
+            self.tap_sync = false;
+            self.lyric_follow = true;
+            self.status = "Tap Sync cancelled. Playback unchanged.".into();
+            return;
+        }
+        let Some(Document::Synced(lyrics)) = self.lyrics.as_ref() else {
+            self.status =
+                "Tap Sync needs timestamped lyrics. Play a track with synced lyrics first.".into();
+            return;
+        };
+        let Some((first, _)) = lyrics
+            .lines()
+            .iter()
+            .enumerate()
+            .find(|(_, line)| !line.text.trim().is_empty())
+        else {
+            self.status = "No lyric lines available to mark".into();
+            return;
+        };
+        self.lyric_cursor = first;
+        self.lyric_follow = false;
+        self.tap_sync = true;
+        self.status="TAP SYNC: choose the line with j/k; press SPACE exactly when you hear it begin. Esc cancels.".into();
+    }
+    /// Real-time handler obtains a fresh playback position rather than using
+    /// the previous UI refresh (which may be up to 350ms stale).
+    fn tap_lyric_now(&mut self) {
+        let position = if self.player.engine.is_some() {
+            self.player.elapsed_ms()
+        } else {
+            player::mpd_status()
+                .ok()
+                .filter(|s| s.state == "play")
+                .map(|s| s.elapsed_ms)
+        };
+        if self.player.paused
+            || self
+                .mpd
+                .as_ref()
+                .is_some_and(|s| self.player.engine != Some(Engine::Mpv) && s.state == "pause")
+        {
+            self.status = "Resume playback before tapping a lyric cue".into();
+            return;
+        }
+        let Some(position) = position else {
+            self.status = "Cannot read live player position. Start playback and try again.".into();
+            return;
+        };
+        self.apply_lyric_cue(position);
+    }
+    fn apply_lyric_cue(&mut self, player_position_ms: i64) {
+        if !self.tap_sync {
+            return;
+        }
+        let Some(Document::Synced(lyrics)) = self.lyrics.as_ref() else {
+            return;
+        };
+        let Some(cue_ms) = lyrics.line_position_ms(self.lyric_cursor, 0) else {
+            self.status = "Invalid lyric cue; choose another line".into();
+            return;
+        };
+        match offset_from_cue(player_position_ms, cue_ms) {
+            Ok(offset) => {
+                let previous = self.lyric_offset_ms;
+                match self.store.set_lyrics_offset(&self.lyric_source, offset) {
+                    Ok(()) => {
+                        self.sync_undo = Some((self.lyric_source.clone(), previous));
+                        self.lyric_offset_ms = offset;
+                        self.tap_sync = false;
+                        self.lyric_follow = true;
+                        self.elapsed_ms = Some(player_position_ms);
+                        self.status = format!(
+                            "Synced at {}! Offset {} saved. Press u to undo, [ / ] to fine-tune.",
+                            format_offset_ms(player_position_ms),
+                            format_offset_ms(offset)
+                        );
+                    }
+                    Err(e) => self.message_error(e),
+                }
+            }
+            Err(e) => self.status = format!("Unable to sync this line: {e}"),
+        }
+    }
+    fn undo_tap_sync(&mut self) {
+        let Some((source, previous)) = self.sync_undo.as_ref() else {
+            self.status = "No Tap Sync change to undo".into();
+            return;
+        };
+        if *source != self.lyric_source {
+            self.status = "Tap Sync undo belongs to a different recording".into();
+            return;
+        }
+        match self.store.set_lyrics_offset(source, *previous) {
+            Ok(()) => {
+                self.lyric_offset_ms = *previous;
+                self.sync_undo = None;
+                self.status = format!(
+                    "Tap Sync undone; previous offset {} restored",
+                    format_offset_ms(self.lyric_offset_ms)
+                );
+            }
+            Err(e) => self.message_error(e),
+        }
     }
     fn move_lyric_cursor(&mut self, delta: isize) {
         let size = match self.lyrics.as_ref() {
@@ -502,6 +616,7 @@ impl App {
             };
             match result {
                 Ok(()) => {
+                    self.tap_sync = false;
                     self.duration_ms = None;
                     self.mpd = player::mpd_status().ok();
                     self.load_lyrics(false);
@@ -707,6 +822,16 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => return true,
+            KeyCode::Esc if self.tap_sync => {
+                self.tap_sync = false;
+                self.lyric_follow = true;
+                self.status = "Tap Sync cancelled. No offset changed.".into();
+            }
+            KeyCode::Char('s') if self.tab == Tab::Playing => self.toggle_tap_sync(),
+            KeyCode::Char('u') if self.tab == Tab::Playing => self.undo_tap_sync(),
+            KeyCode::Char(' ') | KeyCode::Enter if self.tab == Tab::Playing && self.tap_sync => {
+                self.tap_lyric_now()
+            }
             KeyCode::Tab => self.tab = Tab::from_index(self.tab.index() + 1),
             KeyCode::BackTab => self.tab = Tab::from_index(self.tab.index() + 4),
             KeyCode::Char('1'..='5') => {
@@ -793,6 +918,7 @@ impl App {
                 }
             }
             KeyCode::Char('x') => {
+                self.tap_sync = false;
                 self.player.stop();
                 self.elapsed_ms = None;
                 self.status = "Playback stopped".into();
@@ -1189,7 +1315,7 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         .constraints([
             Constraint::Min(7),
             Constraint::Length(3),
-            Constraint::Length(5),
+            Constraint::Length(7),
         ])
         .split(left);
     let details = vec![
@@ -1224,10 +1350,36 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
             .label(format!("{}%", (ratio * 100.0).round() as u8)),
         info[1],
     );
-    frame.render_widget(Paragraph::new(
-        "Space play/pause · n next · x stop\no exact offset · [ / ] ±250ms · 0 reset\nj/k browse lyrics · Enter seek · a follow · L refresh")
-        .block(panel(" Lyrics controls ")).wrap(Wrap{trim:true})
-        .style(Style::default().fg(MUTED)),info[2]);
+    let controls = if app.tap_sync {
+        let cue = match app.lyrics.as_ref() {
+            Some(Document::Synced(lrc)) => lrc.lines().get(app.lyric_cursor).map(|line| {
+                format!(
+                    "{}  [lyric {:02}:{:02}]",
+                    line.text,
+                    line.at_ms / 60_000,
+                    (line.at_ms / 1_000) % 60
+                )
+            }),
+            _ => None,
+        }
+        .unwrap_or_else(|| "Choose a lyric line".into());
+        format!(
+            "SELECTED: {cue}\n↑/↓ or j/k choose another lyric\nSPACE / Enter = TAP when you HEAR it\nEsc = cancel without changing offset"
+        )
+    } else {
+        "s TAP TO SYNC · o exact · [ / ] ±250ms\nSpace pause · n next · x stop\nj/k browse · Enter seek · a follow\nu undo last tap · 0 reset · L refresh".into()
+    };
+    frame.render_widget(
+        Paragraph::new(controls)
+            .block(panel(if app.tap_sync {
+                " TAP SYNC · playback keeps running "
+            } else {
+                " Lyrics controls "
+            }))
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(if app.tap_sync { HIGHLIGHT } else { MUTED })),
+        info[2],
+    );
     draw_lyrics(frame, app, right, elapsed);
 }
 fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
@@ -1239,7 +1391,12 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
         app.lyric_origin.as_str()
     };
     let title = format!(
-        " {state} · offset {} ",
+        " {} · offset {} ",
+        if app.tap_sync {
+            "TAP SYNC: choose a line"
+        } else {
+            state
+        },
         format_offset_ms(app.lyric_offset_ms)
     );
     let Some(doc) = app.lyrics.as_ref() else {
@@ -1276,7 +1433,7 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
                 let distance = at.abs_diff(center);
                 let current = Some(at) == active;
                 let browsed = !app.lyric_follow && at == app.lyric_cursor;
-                let shade = if current {
+                let shade = if current || (app.tap_sync && browsed) {
                     HIGHLIGHT
                 } else if browsed {
                     ACCENT
@@ -1287,7 +1444,9 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
                         _ => Color::Rgb(89, 100, 105),
                     }
                 };
-                let mark = if current {
+                let mark = if app.tap_sync && browsed {
+                    "◎ "
+                } else if current {
                     "♫ "
                 } else if browsed {
                     "> "
@@ -1370,6 +1529,49 @@ mod tests {
             app.tab = tab;
             terminal.draw(|frame| draw(frame, &app)).unwrap();
         }
+    }
+    #[test]
+    fn tap_sync_chooses_line_marks_and_undoes_without_playback_seek() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut app = App::new(store).unwrap();
+        app.tab = Tab::Playing;
+        app.lyric_source = "https://example.test/video".into();
+        app.lyric_key = Some("test-track".into());
+        app.lyrics = Some(Document::Synced(crate::lyrics::Lyrics::parse(
+            "[00:00.00]\n[00:02.00]First lyric\n[00:05.00]Second lyric",
+        )));
+        app.toggle_tap_sync();
+        assert!(app.tap_sync);
+        assert_eq!(app.lyric_cursor, 1, "should skip blank opening line");
+        app.move_lyric_cursor(1);
+        assert_eq!(app.lyric_cursor, 2);
+        // Pressing at 20.750s should align the selected 5.000s lyric there.
+        app.apply_lyric_cue(20_750);
+        assert_eq!(app.lyric_offset_ms, 15_750);
+        assert!(!app.tap_sync);
+        assert!(app.lyric_follow);
+        assert_eq!(app.store.lyrics_offset(&app.lyric_source).unwrap(), 15_750);
+        app.undo_tap_sync();
+        assert_eq!(app.store.lyrics_offset(&app.lyric_source).unwrap(), 0);
+        assert!(app.sync_undo.is_none());
+    }
+    #[test]
+    fn tap_sync_rejects_out_of_range_cues() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut app = App::new(store).unwrap();
+        app.tab = Tab::Playing;
+        app.lyric_source = "source".into();
+        app.lyric_key = Some("test-track".into());
+        app.lyrics = Some(Document::Synced(crate::lyrics::Lyrics::parse(
+            "[00:01.00]First lyric",
+        )));
+        app.toggle_tap_sync();
+        app.apply_lyric_cue(4_000_000);
+        assert!(app.tap_sync, "invalid mark stays in guided mode");
+        assert_eq!(app.store.lyrics_offset("source").unwrap(), 0);
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.tap_sync);
+        assert_eq!(app.store.lyrics_offset("source").unwrap(), 0);
     }
     #[test]
     fn video_lyrics_use_original_identity_and_allow_precise_edits() {
