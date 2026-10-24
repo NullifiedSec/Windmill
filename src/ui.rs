@@ -2,6 +2,7 @@
 use crate::{
     download::{self, Kind},
     lyrics::Lyrics,
+    mpris::{self, Control, Snapshot},
     player::{self, Engine, Playback, Status},
     store::{Media, Store},
     youtube::{self, Video},
@@ -390,6 +391,107 @@ impl App {
             }
         }
     }
+    fn mpris_snapshot(&self) -> Snapshot {
+        let mut snap = Snapshot::default();
+        let mpd = self.mpd.as_ref();
+        if self.player.engine == Some(Engine::Mpv) {
+            if let Some(media) = self.player.active.as_ref() {
+                snap.title = media.title.clone();
+                snap.artist = media.creator.clone();
+                snap.source = media.source.clone();
+            }
+            snap.state = if self.player.paused {
+                "Paused"
+            } else {
+                "Playing"
+            };
+            snap.can_play = self.player.active.is_some();
+            snap.can_seek = snap.can_play;
+            snap.volume = self.player.volume().unwrap_or(1.0);
+        } else {
+            // Always source MPD metadata from its actual current song. The daemon's
+            // track can change via Next/Previous without changing Windmill's selection.
+            if let Some(mpd) = mpd {
+                snap.title = mpd.title.clone().unwrap_or_default();
+                snap.artist = mpd.artist.clone().unwrap_or_default();
+                if let Some(file) = mpd.file.as_ref() {
+                    snap.source = format!("mpd:{file}");
+                }
+                // Preserve custom Windmill metadata for the item that is actually
+                // in MPD; after Next, fall back to the daemon's new track metadata.
+                if let Some(media) = self.player.active.as_ref()
+                    && player::mpd_relative(&media.source).ok().as_deref() == mpd.file.as_deref()
+                {
+                    snap.title = media.title.clone();
+                    snap.artist = media.creator.clone();
+                    snap.source = media.source.clone();
+                }
+                snap.duration_us = mpd.duration_ms.map(|v| v.saturating_mul(1000));
+                snap.state = match mpd.state.as_str() {
+                    "play" => "Playing",
+                    "pause" => "Paused",
+                    _ => "Stopped",
+                };
+                snap.can_play = mpd.file.is_some();
+                snap.can_seek = snap.can_play;
+                let length = mpd.playlist_length.unwrap_or(0);
+                let position = mpd.song;
+                snap.can_go_next = position.is_some_and(|p| p.saturating_add(1) < length);
+                snap.can_go_previous = position.is_some_and(|p| p > 0);
+                snap.volume = mpd.volume.map(|v| f64::from(v) / 100.0).unwrap_or(1.0);
+            }
+        }
+        let elapsed = if self.player.engine == Some(Engine::Mpv) {
+            self.elapsed_ms
+        } else {
+            self.elapsed_ms.or_else(|| mpd.map(|s| s.elapsed_ms))
+        };
+        snap.position_us = elapsed.unwrap_or(0).saturating_mul(1000);
+        snap
+    }
+    fn mpris_command(&mut self, control: Control) -> Option<i64> {
+        let snapshot = self.mpris_snapshot();
+        match control {
+            Control::Play | Control::Pause | Control::Toggle if !snapshot.can_play => return None,
+            Control::Next if !snapshot.can_go_next => return None,
+            Control::Previous if !snapshot.can_go_previous => return None,
+            Control::Seek(_) | Control::SetPosition(_) if !snapshot.can_seek => return None,
+            _ => {}
+        }
+        let mut seeked = false;
+        let result: std::result::Result<(), Box<dyn Error>> = match control {
+            Control::Play => self.player.play(),
+            Control::Pause => self.player.pause(),
+            Control::Toggle => self.player.toggle(),
+            Control::Stop => {
+                self.player.stop();
+                self.elapsed_ms = None;
+                self.status = "Playback stopped by media control".into();
+                Ok(())
+            }
+            Control::Next => self.player.next(),
+            Control::Previous => self.player.previous(),
+            Control::Seek(offset) => {
+                seeked = true;
+                self.player.seek_relative(offset)
+            }
+            Control::SetPosition(position) => {
+                seeked = true;
+                self.player.seek_absolute(position)
+            }
+            Control::Volume(volume) => self.player.set_volume(volume),
+        };
+        if let Err(e) = result {
+            self.message_error(e)
+        }
+        self.last_tick = Instant::now() - Duration::from_secs(2);
+        self.tick();
+        if seeked {
+            self.elapsed_ms.map(|ms| ms.saturating_mul(1000))
+        } else {
+            None
+        }
+    }
     fn key(&mut self, key: KeyEvent) -> bool {
         if key.kind != KeyEventKind::Press {
             return false;
@@ -556,11 +658,28 @@ pub fn run(store: Store) -> Result<()> {
         return Err("Windmill TUI requires a terminal".into());
     }
     let mut app = App::new(store)?;
+    let mpris = match mpris::Bridge::new() {
+        Ok(server) => Some(server),
+        Err(e) => {
+            app.status = format!("MPRIS unavailable (TUI works): {e}");
+            None
+        }
+    };
     let _screen = Screen::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
     loop {
         app.tick();
+        if let Some(bridge) = mpris.as_ref() {
+            while let Ok(command) = bridge.commands().try_recv() {
+                if let Some(position) = app.mpris_command(command) {
+                    let _ = bridge.seeked(position);
+                }
+            }
+            if let Err(e) = bridge.update(app.mpris_snapshot()) {
+                app.status = format!("MPRIS signal error: {e}");
+            }
+        }
         terminal.draw(|f| draw(f, &app))?;
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
@@ -790,23 +909,20 @@ fn draw_recommendations(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     );
 }
 fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
-    let active = app.player.active.as_ref();
-    let mpd = app.mpd.as_ref();
-    let title = active
-        .map(|m| m.title.as_str())
-        .or_else(|| mpd.and_then(|s| s.title.as_deref()))
-        .unwrap_or("Nothing playing");
-    let creator = active.map(|m| m.creator.as_str()).unwrap_or("");
+    let snap = app.mpris_snapshot();
+    let title = if snap.title.is_empty() {
+        "Nothing playing"
+    } else {
+        &snap.title
+    };
+    let creator = &snap.artist;
     let engine = match app.player.engine {
         Some(Engine::Mpv) => "mpv",
         Some(Engine::Mpd) => "MPD",
         None => "MPD / mpv",
     };
-    let state = mpd.map(|s| s.state.as_str()).unwrap_or("disconnected");
-    let elapsed = app
-        .elapsed_ms
-        .or_else(|| mpd.map(|s| s.elapsed_ms))
-        .unwrap_or(0);
+    let state = snap.state;
+    let elapsed = snap.position_us / 1000;
     let minutes = elapsed.max(0) / 60_000;
     let seconds = (elapsed.max(0) / 1_000) % 60;
     let text = format!(

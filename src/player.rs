@@ -20,6 +20,11 @@ pub struct Status {
     pub elapsed_ms: i64,
     pub volume: Option<u8>,
     pub title: Option<String>,
+    pub artist: Option<String>,
+    pub file: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub playlist_length: Option<u32>,
+    pub song: Option<u32>,
 }
 
 pub fn mpd_quote(value: &str) -> String {
@@ -81,7 +86,21 @@ fn parse_status(raw: &str) -> Status {
             }
             "volume" => result.volume = value.parse().ok(),
             "Title" => result.title = Some(value.to_string()),
-            "file" if result.title.is_none() => result.title = Some(value.to_string()),
+            "Artist" => result.artist = Some(value.to_string()),
+            "file" => {
+                result.file = Some(value.to_string());
+                if result.title.is_none() {
+                    result.title = Some(value.to_string());
+                }
+            }
+            "duration" => {
+                result.duration_ms = value
+                    .parse::<f64>()
+                    .ok()
+                    .map(|v| (v.max(0.0) * 1000.0) as i64)
+            }
+            "playlistlength" => result.playlist_length = value.parse().ok(),
+            "song" => result.song = value.parse().ok(),
             _ => {}
         }
     }
@@ -110,7 +129,7 @@ fn music_dir() -> Result<PathBuf> {
     }
     Ok(PathBuf::from(env::var("HOME")?).join("Music"))
 }
-fn mpd_relative(path: &str) -> Result<String> {
+pub fn mpd_relative(path: &str) -> Result<String> {
     let root = music_dir()?.canonicalize()?;
     let file = Path::new(path).canonicalize()?;
     let relative = file
@@ -231,6 +250,11 @@ impl Playback {
                     self.active = None;
                     return None;
                 }
+                if let Ok(result) = self.ipc(json!(["get_property", "pause"]))
+                    && let Some(paused) = result["data"].as_bool()
+                {
+                    self.paused = paused;
+                }
                 self.ipc(json!(["get_property", "time-pos"]))
                     .ok()
                     .and_then(|r| r["data"].as_f64())
@@ -240,6 +264,102 @@ impl Playback {
             None => None,
         }
     }
+    pub fn play(&mut self) -> Result<()> {
+        match self.engine {
+            Some(Engine::Mpv) => {
+                self.ipc(json!(["set_property", "pause", false]))?;
+                self.paused = false;
+            }
+            Some(Engine::Mpd) | None => {
+                mpd_request(&["play"])?;
+                self.paused = false;
+            }
+        }
+        Ok(())
+    }
+    pub fn pause(&mut self) -> Result<()> {
+        match self.engine {
+            Some(Engine::Mpv) => {
+                self.ipc(json!(["set_property", "pause", true]))?;
+                self.paused = true;
+            }
+            Some(Engine::Mpd) | None => {
+                mpd_request(&["pause 1"])?;
+                self.paused = true;
+            }
+        }
+        Ok(())
+    }
+    pub fn previous(&mut self) -> Result<()> {
+        match self.engine {
+            Some(Engine::Mpv) => {
+                self.ipc(json!(["playlist-prev", "weak"]))?;
+            }
+            Some(Engine::Mpd) => {
+                mpd_request(&["previous"])?;
+            }
+            None => {
+                mpd_request(&["previous"])?;
+            }
+        }
+        Ok(())
+    }
+    pub fn seek_relative(&mut self, offset_us: i64) -> Result<()> {
+        let seconds = offset_us as f64 / 1_000_000.0;
+        match self.engine {
+            Some(Engine::Mpv) => {
+                self.ipc(json!(["seek", seconds, "relative"]))?;
+            }
+            Some(Engine::Mpd) => {
+                mpd_request(&[&format!("seekcur {seconds:+.6}")])?;
+            }
+            None => {}
+        }
+        Ok(())
+    }
+    pub fn seek_absolute(&mut self, position_us: i64) -> Result<()> {
+        if position_us < 0 {
+            return Ok(());
+        }
+        let seconds = position_us as f64 / 1_000_000.0;
+        match self.engine {
+            Some(Engine::Mpv) => {
+                self.ipc(json!(["seek", seconds, "absolute"]))?;
+            }
+            Some(Engine::Mpd) => {
+                mpd_request(&[&format!("seekcur {seconds:.6}")])?;
+            }
+            None => {}
+        }
+        Ok(())
+    }
+    pub fn volume(&self) -> Option<f64> {
+        match self.engine {
+            Some(Engine::Mpv) => self
+                .ipc(json!(["get_property", "volume"]))
+                .ok()
+                .and_then(|x| x["data"].as_f64())
+                .map(|v| (v / 100.0).clamp(0.0, 1.0)),
+            Some(Engine::Mpd) | None => mpd_status()
+                .ok()
+                .and_then(|s| s.volume.map(|v| v as f64 / 100.0)),
+        }
+    }
+    pub fn set_volume(&mut self, volume: f64) -> Result<()> {
+        if !volume.is_finite() {
+            return Err("invalid volume".into());
+        }
+        let percent = (volume.clamp(0.0, 1.0) * 100.0).round() as u8;
+        match self.engine {
+            Some(Engine::Mpv) => {
+                self.ipc(json!(["set_property", "volume", percent]))?;
+            }
+            Some(Engine::Mpd) | None => {
+                mpd_request(&[&format!("setvol {percent}")])?;
+            }
+        }
+        Ok(())
+    }
     pub fn next(&mut self) -> Result<()> {
         match self.engine {
             Some(Engine::Mpv) => {
@@ -248,7 +368,9 @@ impl Playback {
             Some(Engine::Mpd) => {
                 mpd_request(&["next"])?;
             }
-            None => {}
+            None => {
+                mpd_request(&["next"])?;
+            }
         }
         Ok(())
     }
@@ -265,6 +387,18 @@ mod tests {
     #[test]
     fn mpd_escapes_untrusted_names() {
         assert_eq!(mpd_quote("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
+    #[test]
+    fn mpd_queue_and_tags_from_native_protocol() {
+        let s = parse_status(
+            "state: play\nplaylistlength: 4\nsong: 1\nfile: album/test.flac\nTitle: Second track\nArtist: Example Artist\nduration: 65.7\n",
+        );
+        assert_eq!(s.playlist_length, Some(4));
+        assert_eq!(s.song, Some(1));
+        assert_eq!(s.file.as_deref(), Some("album/test.flac"));
+        assert_eq!(s.title.as_deref(), Some("Second track"));
+        assert_eq!(s.artist.as_deref(), Some("Example Artist"));
+        assert_eq!(s.duration_ms, Some(65_700));
     }
     #[test]
     fn parsed_status_uses_milliseconds() {
