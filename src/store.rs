@@ -28,6 +28,10 @@ impl Store {
               source TEXT PRIMARY KEY,
               offset_ms INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS lyric_manual_sources (
+              source TEXT PRIMARY KEY,
+              lrclib_id INTEGER NOT NULL CHECK(lrclib_id > 0)
+            );
             CREATE TABLE IF NOT EXISTS assets (
               media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
               kind TEXT NOT NULL CHECK(kind IN ('audio','video')),
@@ -157,6 +161,33 @@ impl Store {
             return Ok(value);
         }
         self.lyrics_offset(source)
+    }
+    /// An explicit LRCLIB track choice belongs to the canonical recording URL.
+    /// Manual selections override auto search (and local sidecars) until reset.
+    pub fn manual_lyrics_id(&self, source: &str) -> Result<Option<u64>> {
+        self.conn
+            .query_row(
+                "SELECT lrclib_id FROM lyric_manual_sources WHERE source=?1",
+                [source],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()
+    }
+    pub fn set_manual_lyrics_id(&self, source: &str, id: u64) -> Result<()> {
+        if source.is_empty() || id == 0 || id > i64::MAX as u64 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.conn.execute(
+            "INSERT INTO lyric_manual_sources(source,lrclib_id) VALUES(?1,?2)
+             ON CONFLICT(source) DO UPDATE SET lrclib_id=excluded.lrclib_id",
+            params![source, id as i64],
+        )?;
+        Ok(())
+    }
+    pub fn clear_manual_lyrics_id(&self, source: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM lyric_manual_sources WHERE source=?1", [source])?;
+        Ok(())
     }
     pub fn set_lyrics_offset(&self, source: &str, ms: i64) -> Result<()> {
         self.conn.execute(
@@ -578,6 +609,32 @@ mod tests {
         assert_eq!(s.collections().unwrap(), vec!["My Mood"]);
         assert!(s.has("some-path.mp3").unwrap());
         assert!(!s.has("missing").unwrap());
+    }
+    #[test]
+    fn manual_lyrics_selection_survives_restart_and_can_be_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("windmill.sqlite");
+        {
+            let store = Store::open(&db).unwrap();
+            assert_eq!(store.manual_lyrics_id("youtube:video").unwrap(), None);
+            store
+                .set_manual_lyrics_id("youtube:video", 36174111)
+                .unwrap();
+            store
+                .set_manual_lyrics_id("youtube:video", 36174112)
+                .unwrap();
+            store.set_lyrics_offset("youtube:video", 1234).unwrap();
+            assert!(store.set_manual_lyrics_id("youtube:video", 0).is_err());
+        }
+        let store = Store::open(&db).unwrap();
+        assert_eq!(
+            store.manual_lyrics_id("youtube:video").unwrap(),
+            Some(36174112)
+        );
+        assert_eq!(store.lyrics_offset("youtube:video").unwrap(), 1234);
+        store.clear_manual_lyrics_id("youtube:video").unwrap();
+        assert_eq!(store.manual_lyrics_id("youtube:video").unwrap(), None);
+        assert_eq!(store.lyrics_offset("youtube:video").unwrap(), 1234);
     }
     #[test]
     fn video_offset_survives_local_asset_change() {

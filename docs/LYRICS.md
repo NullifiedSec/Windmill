@@ -1,6 +1,9 @@
-# Windmill lyrics (v0.3.4)
+# Windmill lyrics (v0.5.1)
 
 ## Source priority
+
+If you have explicitly pinned an LRCLIB track, it overrides normal
+matching, including local sidecar files. Otherwise, order is:
 
 1. Local `file.lrc` alongside the playing file, including MPD library songs.
 2. Offline SHA-256-keyed private cache at `~/.local/share/windmill/lyrics/`, or `$WINDMILL_DATA_DIR/lyrics/`.
@@ -12,6 +15,8 @@ Windmill uses TLS-verified curl with timeouts, response-size limits, and no Goog
 
 | Key | Action |
 |---|---|
+| `M` | Paste LRCLIB track link or numeric ID |
+| `U` | Unpin manual LRCLIB record; return to automatic matching |
 | `s` | Toggle guided Tap Sync mode |
 | `p` | Play/pause without exiting Tap Sync |
 | `Space` / `Enter` | During Tap Sync, mark the start of the selected lyric at the current live playback time |
@@ -25,6 +30,29 @@ Windmill uses TLS-verified curl with timeouts, response-size limits, and no Goog
 | Enter | Seek to selected timestamped line |
 | `a` | Return to auto-follow |
 | `L` | Refresh lookup manually |
+
+### Manual LRCLIB ID and virtual blank padding
+
+Press `M` while playing, and paste a record link like
+`https://lrclib.net/tracks/36174111`. Windmill fetches exactly the
+record identified by that numeric ID, even when titles, artists or
+durations do not match. It saves the override only after a usable
+response, in the local SQLite database keyed by original media source.
+Downloaded copies of the same video reuse that choice. Private per-ID
+caching enables offline playback; press `U` to restore auto/local lyrics.
+
+For a shorter lyric transcript, blank timestamps clear the last sung
+line during the instrumental outro. The display also leaves blank space
+before vocals begin. If a transcript is longer than the recording,
+Windmill displays its remaining duration as a *virtual lyric tail*;
+it does not add actual silence to the audio and will not seek past EOF.
+You can shift lyric timing using `s` Tap Sync, `o` exact offset, or
+`[`/`]` fine controls. Extra dialogue inserted in the *middle*
+of a song still needs segment-specific timing.
+
+Links are restricted to the official LRCLIB domain or a numeric ID.
+The app never fetches arbitrary pasted URLs and doesn't overwrite
+a working pinned record if a new request fails.
 
 ### Guided Tap Sync (recommended)
 
@@ -85,4 +113,4 @@ The current line is centered/highlighted, while neighboring lines fade. Enhanced
 
 ## Not yet implemented
 
-Manual LRCLIB result selection, artist/title correction UI, cover artwork, audio fingerprinting and richer word-timed provider formats. Metadata quality and external service availability limit remote lyric matching.
+Artist/title correction UI, audio fingerprinting, genuine silent audio extension and richer word-timed provider formats. Metadata quality and external service availability limit remote lyric matching.

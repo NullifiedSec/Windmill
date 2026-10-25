@@ -42,6 +42,7 @@ pub enum Document {
 pub struct Loaded {
     pub document: Document,
     pub origin: String,
+    pub lyrics_duration_ms: Option<i64>,
 }
 fn normalize(value: &str) -> String {
     value
@@ -87,18 +88,28 @@ fn sidecar_document(path: &Path) -> Option<Loaded> {
     (!lyrics.is_empty()).then_some(Loaded {
         document: Document::Synced(lyrics),
         origin: "Local .lrc".into(),
+        lyrics_duration_ms: None,
     })
 }
 fn parse_item(item: &Value, origin: &str) -> Option<Loaded> {
     if item.get("instrumental").and_then(Value::as_bool) == Some(true) {
         return None;
     }
+    let duration = item
+        .get("duration")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite() && *v > 0. && *v <= 7200.)
+        .map(|v| (v * 1000.).round() as i64);
     if let Some(text) = item.get("syncedLyrics").and_then(Value::as_str) {
-        let lrc = Lyrics::parse(text);
-        if !lrc.is_empty() {
+        let mut lyrics = Lyrics::parse(text);
+        if !lyrics.is_empty() {
+            if let Some(duration) = duration {
+                lyrics.pad_blank_to(duration)
+            }
             return Some(Loaded {
-                document: Document::Synced(lrc),
+                document: Document::Synced(lyrics),
                 origin: origin.into(),
+                lyrics_duration_ms: duration,
             });
         }
     }
@@ -107,9 +118,109 @@ fn parse_item(item: &Value, origin: &str) -> Option<Loaded> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| Loaded {
-            document: Document::Plain(s.to_owned()),
+            document: Document::Plain(s.into()),
             origin: origin.into(),
+            lyrics_duration_ms: duration,
         })
+}
+/// Only a numeric track id from a fixed LRCLIB URL is accepted. Never send
+/// arbitrary user-provided URLs to curl (avoids local-network SSRF).
+pub fn parse_manual_link(raw: &str) -> Result<u64> {
+    let raw = raw.trim().trim_end_matches('/');
+    let id = raw
+        .strip_prefix("https://lrclib.net/tracks/")
+        .or_else(|| raw.strip_prefix("https://www.lrclib.net/tracks/"))
+        .unwrap_or(raw);
+    if id.is_empty() || id.len() > 18 || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Paste a valid https://lrclib.net/tracks/12345678 link".into());
+    }
+    let id = id.parse::<u64>()?;
+    if id == 0 || id > i64::MAX as u64 {
+        return Err("Invalid LRCLIB track ID".into());
+    }
+    // Reject unsupported lookalike URLs (including http, deceptive host,
+    // query parameters or IDs with unsupported path components).
+    if raw.contains("://")
+        && !(raw.starts_with("https://lrclib.net/tracks/")
+            || raw.starts_with("https://www.lrclib.net/tracks/"))
+    {
+        return Err("Only official HTTPS LRCLIB track URLs are supported".into());
+    }
+    Ok(id)
+}
+fn pinned_cache_path(data: &Path, id: u64) -> PathBuf {
+    data.join("lyrics").join(format!("lrclib-{id}.json"))
+}
+fn write_cache(path: &Path, json: &Value) -> Result<()> {
+    let parent = path.parent().ok_or("Invalid lyrics cache path")?;
+    fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(serde_json::to_string(json)?.as_bytes())?;
+    temp.as_file()
+        .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    temp.persist(path)?;
+    Ok(())
+}
+/// User-picked LRCLIB records skip name and duration checks and take
+/// precedence over sidecars/auto results. Always use a fixed-origin API URL.
+pub fn load_manual(id: u64, data: &Path, online: bool, refresh: bool) -> Result<Option<Loaded>> {
+    if id == 0 || id > i64::MAX as u64 {
+        return Err("Invalid LRCLIB track ID".into());
+    }
+    let cache = pinned_cache_path(data, id);
+    if !refresh
+        && let Ok(bytes) = fs::read(&cache)
+        && let Ok(json) = serde_json::from_slice::<Value>(&bytes)
+        && json.get("id").and_then(Value::as_u64) == Some(id)
+        && let Some(found) = parse_item(&json, &format!("Manual LRCLIB #{id} (cached)"))
+    {
+        return Ok(Some(found));
+    }
+    if !online {
+        return Ok(None);
+    }
+    let url = format!("https://lrclib.net/api/get/{id}");
+    let result = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-time",
+            "12",
+            "--connect-timeout",
+            "5",
+            "--max-filesize",
+            "524288",
+            "--compressed",
+            "--url",
+            &url,
+            "--user-agent",
+            "Windmill/0.5.0 (local-first media center)",
+        ])
+        .output()?;
+    if !result.status.success() {
+        return Err(format!(
+            "LRCLIB track #{id} could not be fetched: {}",
+            String::from_utf8_lossy(&result.stderr)
+                .chars()
+                .take(150)
+                .collect::<String>()
+        )
+        .into());
+    }
+    if result.stdout.len() > 524288 {
+        return Err("LRCLIB response too large".into());
+    }
+    let json: Value = serde_json::from_slice(&result.stdout)?;
+    if json.get("id").and_then(Value::as_u64) != Some(id) {
+        return Err("LRCLIB returned a mismatched record".into());
+    }
+    let found = parse_item(&json, &format!("Manual LRCLIB #{id}"));
+    if found.is_some() {
+        write_cache(&cache, &json)?
+    }
+    Ok(found)
 }
 fn select_match<'a>(json: &'a Value, req: &Request) -> Option<&'a Value> {
     let title = normalize(&clean_title(&req.title, &req.artist));
@@ -220,21 +331,70 @@ pub fn load(req: &Request, data_dir: &Path, online: bool, refresh: bool) -> Resu
     let Some(loaded) = parse_item(selected, "LRCLIB") else {
         return Ok(None);
     };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-        temp.write_all(serde_json::to_string(selected)?.as_bytes())?;
-        // The cache stays private to the current user.
-        temp.as_file()
-            .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        temp.persist(&path)?;
-    }
+    write_cache(&path, selected)?;
     Ok(Some(loaded))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn strict_manual_url_parser_blocks_injection_and_ssrf() {
+        assert_eq!(
+            parse_manual_link("https://lrclib.net/tracks/36174111").unwrap(),
+            36174111
+        );
+        assert_eq!(
+            parse_manual_link("https://lrclib.net/tracks/36174111/").unwrap(),
+            36174111
+        );
+        assert_eq!(parse_manual_link("36174111").unwrap(), 36174111);
+        for bad in [
+            "http://lrclib.net/tracks/36174111",
+            "https://lrclib.net.evil.test/tracks/36174111",
+            "https://lrclib.net/tracks/36174111?redirect=127.0.0.1",
+            "https://lrclib.net/tracks/0",
+            "https://lrclib.net/tracks/1/another",
+            "https://evil.test/36174111",
+            "-11",
+            "99999999999999999999999",
+        ] {
+            assert!(parse_manual_link(bad).is_err(), "{bad}");
+        }
+    }
+    #[test]
+    fn manual_cache_bypasses_mismatched_song_metadata_and_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = 36174111;
+        let json = serde_json::json!({"id":id,"trackName":"Totally different name",
+            "artistName":"Different Artist","duration":237.0,
+            "syncedLyrics":"[00:08.00]Words\n[03:49.58] "});
+        write_cache(&pinned_cache_path(dir.path(), id), &json).unwrap();
+        let found = load_manual(id, dir.path(), false, false).unwrap().unwrap();
+        assert!(found.origin.contains("Manual LRCLIB"));
+        assert_eq!(found.lyrics_duration_ms, Some(237_000));
+        let Document::Synced(lyrics) = found.document else {
+            panic!("timing missing")
+        };
+        assert_eq!(lyrics.lines()[0].text, "Words");
+        assert_eq!(lyrics.lines().last().unwrap().at_ms, 237_000);
+        assert!(lyrics.lines().last().unwrap().text.is_empty());
+    }
+    #[test]
+    #[ignore = "performs a real LRCLIB record lookup"]
+    fn real_manual_example_and_offline_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = load_manual(36174111, dir.path(), true, false)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(found.document, Document::Synced(_)));
+        assert_eq!(found.lyrics_duration_ms, Some(237_000));
+        assert!(
+            load_manual(36174111, dir.path(), false, false)
+                .unwrap()
+                .is_some()
+        );
+    }
     #[test]
     fn strips_only_known_decorations() {
         assert_eq!(

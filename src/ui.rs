@@ -89,6 +89,7 @@ enum Prompt {
     Collection(String),
     Filter(String),
     LyricOffset(String),
+    ManualLyrics(String),
     JumpTime(String),
     PlaylistUrl(String),
     MusicQuery(String),
@@ -101,6 +102,7 @@ impl Prompt {
             | Self::Collection(t)
             | Self::Filter(t)
             | Self::LyricOffset(t)
+            | Self::ManualLyrics(t)
             | Self::JumpTime(t)
             | Self::PlaylistUrl(t)
             | Self::MusicQuery(t) => t,
@@ -113,6 +115,7 @@ impl Prompt {
             | Self::Collection(t)
             | Self::Filter(t)
             | Self::LyricOffset(t)
+            | Self::ManualLyrics(t)
             | Self::JumpTime(t)
             | Self::PlaylistUrl(t)
             | Self::MusicQuery(t) => t,
@@ -125,6 +128,7 @@ impl Prompt {
             Self::Collection(_) => "Create & add collection",
             Self::Filter(_) => "Recommendation tags, comma-separated",
             Self::LyricOffset(_) => "Lyrics offset (+seconds or -mm:ss.sss) — Enter saves",
+            Self::ManualLyrics(_) => "Paste LRCLIB track link (https://lrclib.net/tracks/12345)",
             Self::JumpTime(_) => "Jump to playback time (seconds, m:ss, h:mm:ss)",
             Self::PlaylistUrl(_) => "Public YouTube / YouTube Music playlist URL",
             Self::MusicQuery(_) => "YouTube Music search (songs:/albums:/artists:/playlists:query)",
@@ -133,6 +137,9 @@ impl Prompt {
 }
 struct LyricResponse {
     key: String,
+    generation: u64,
+    manual_id: Option<u64>,
+    pin_on_success: bool,
     result: std::result::Result<Option<Loaded>, String>,
 }
 struct DownloadResponse {
@@ -213,6 +220,8 @@ pub struct App {
     sync_undo: Option<(String, i64)>,
     seek_undo: Option<(String, i64)>,
     lyric_pending: bool,
+    lyric_generation: u64,
+    lyrics_duration_ms: Option<i64>,
     lyric_tx: Sender<LyricResponse>,
     lyric_rx: Receiver<LyricResponse>,
     duration_ms: Option<i64>,
@@ -297,6 +306,8 @@ impl App {
             sync_undo: None,
             seek_undo: None,
             lyric_pending: false,
+            lyric_generation: 0,
+            lyrics_duration_ms: None,
             lyric_tx,
             lyric_rx,
             duration_ms: None,
@@ -696,6 +707,60 @@ impl App {
             });
         });
     }
+    fn pin_manual_lyrics(&mut self, link: &str) {
+        if self.lyric_key.is_none() {
+            self.status = "Play a song before choosing an LRCLIB link".into();
+            return;
+        }
+        let id = match lyric_source::parse_manual_link(link) {
+            Ok(id) => id,
+            Err(e) => {
+                self.status = format!("Invalid LRCLIB link: {e}");
+                return;
+            }
+        };
+        let dir = match crate::data_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                self.message_error(e);
+                return;
+            }
+        };
+        self.lyric_generation = self.lyric_generation.wrapping_add(1);
+        let generation = self.lyric_generation;
+        let Some(key) = self.lyric_key.clone() else {
+            return;
+        };
+        let tx = self.lyric_tx.clone();
+        self.lyric_pending = true;
+        self.lyric_status = format!("Fetching selected LRCLIB #{id}...");
+        self.status = format!("Checking LRCLIB #{id} (will save only if usable)");
+        std::thread::spawn(move || {
+            let result =
+                lyric_source::load_manual(id, &dir, true, false).map_err(|e| e.to_string());
+            let _ = tx.send(LyricResponse {
+                key,
+                generation,
+                manual_id: Some(id),
+                pin_on_success: true,
+                result,
+            });
+        });
+    }
+    fn restore_auto_lyrics(&mut self) {
+        if self.lyric_key.is_none() {
+            self.status = "Play a song before clearing an LRCLIB link".into();
+            return;
+        }
+        match self.store.clear_manual_lyrics_id(&self.lyric_source) {
+            Ok(()) => {
+                self.lyric_generation = self.lyric_generation.wrapping_add(1);
+                self.status = "Manual lyrics removed; returning to automatic matching".into();
+                self.load_lyrics(true);
+            }
+            Err(e) => self.message_error(e),
+        }
+    }
     fn load_lyrics(&mut self, refresh: bool) {
         let Some(request) = self.current_lyric_request() else {
             self.lyrics = None;
@@ -703,6 +768,8 @@ impl App {
             self.tap_sync = false;
             self.lyric_status = "Nothing playing".into();
             self.lyric_pending = false;
+            self.lyric_generation = self.lyric_generation.wrapping_add(1);
+            self.lyrics_duration_ms = None;
             return;
         };
         let key = format!(
@@ -723,6 +790,7 @@ impl App {
         if !same_track {
             self.tap_sync = false;
             self.lyrics = None;
+            self.lyrics_duration_ms = None;
             self.lyric_cursor = 0;
             self.lyric_follow = true;
         }
@@ -741,11 +809,29 @@ impl App {
                 return;
             }
         };
+        let manual_id = match self.store.manual_lyrics_id(&request.source) {
+            Ok(id) => id,
+            Err(e) => {
+                self.message_error(e);
+                return;
+            }
+        };
+        self.lyric_generation = self.lyric_generation.wrapping_add(1);
+        let generation = self.lyric_generation;
         let tx = self.lyric_tx.clone();
         std::thread::spawn(move || {
-            let result =
-                lyric_source::load(&request, &data_dir, true, refresh).map_err(|e| e.to_string());
-            let _ = tx.send(LyricResponse { key, result });
+            let result = match manual_id {
+                Some(id) => lyric_source::load_manual(id, &data_dir, true, refresh),
+                None => lyric_source::load(&request, &data_dir, true, refresh),
+            }
+            .map_err(|e| e.to_string());
+            let _ = tx.send(LyricResponse {
+                key,
+                generation,
+                manual_id,
+                pin_on_success: false,
+                result,
+            });
         });
     }
     fn set_lyric_offset(&mut self, offset_ms: i64) {
@@ -1395,6 +1481,7 @@ impl App {
                 Ok(ms) => self.seek_to(ms),
                 Err(error) => self.status = format!("Invalid seek time: {error}"),
             },
+            Prompt::ManualLyrics(link) => self.pin_manual_lyrics(&link),
             Prompt::LyricOffset(value) => match parse_offset_ms(&value) {
                 Ok(ms) => self.set_lyric_offset(ms),
                 Err(problem) => self.status = format!("Invalid lyrics offset: {problem}"),
@@ -1727,6 +1814,16 @@ impl App {
                 self.status = "Lyrics auto-follow enabled".into();
             }
             KeyCode::Char('L') if self.tab == Tab::Playing => self.load_lyrics(true),
+            KeyCode::Char('M') if self.tab == Tab::Playing => {
+                if self.lyric_key.is_some() {
+                    self.prompt = Some(Prompt::ManualLyrics(String::new()));
+                    self.status =
+                        "Paste an LRCLIB track page link; your selection will be remembered".into();
+                } else {
+                    self.status = "Play a song before choosing lyrics".into()
+                }
+            }
+            KeyCode::Char('U') if self.tab == Tab::Playing => self.restore_auto_lyrics(),
             KeyCode::Char('o') if self.tab == Tab::Playing => {
                 if self.lyric_key.is_some() {
                     self.prompt = Some(Prompt::LyricOffset(String::new()));
@@ -1946,12 +2043,29 @@ impl App {
             }
         }
         while let Ok(response) = self.lyric_rx.try_recv() {
-            if self.lyric_key.as_deref() != Some(&response.key) {
+            if self.lyric_key.as_deref() != Some(&response.key)
+                || self.lyric_generation != response.generation
+            {
                 continue;
             }
             self.lyric_pending = false;
             match response.result {
-                Ok(Some(Loaded { document, origin })) => {
+                Ok(Some(Loaded {
+                    document,
+                    origin,
+                    lyrics_duration_ms,
+                })) => {
+                    if response.pin_on_success
+                        && let Some(id) = response.manual_id
+                    {
+                        if let Err(e) = self.store.set_manual_lyrics_id(&self.lyric_source, id) {
+                            self.message_error(e);
+                            continue;
+                        }
+                        self.status =
+                            format!("Pinned LRCLIB #{id} to this recording. Tap Sync to align.");
+                    }
+                    self.lyrics_duration_ms = lyrics_duration_ms;
                     let count = match &document {
                         Document::Synced(lrc) => lrc.lines().len(),
                         Document::Plain(text) => text.lines().count(),
@@ -1962,10 +2076,15 @@ impl App {
                     self.lyric_follow = true;
                 }
                 Ok(None) => {
-                    self.lyric_status = "No matching lyrics found · press L to retry".into();
+                    self.lyric_status =
+                        "No lyrics found. Press M to paste an LRCLIB track link.".into();
+                    if response.pin_on_success {
+                        self.status="That LRCLIB record has no usable lyrics; your previous selection is unchanged".into();
+                    }
                 }
                 Err(err) => {
                     self.lyric_status = format!("Lyrics unavailable: {err}");
+                    self.status = format!("LRCLIB lookup failed: {err}");
                 }
             }
         }
@@ -2640,7 +2759,30 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
             "SELECTED: {cue}\np PLAY / PAUSE · j/k choose a lyric\nSPACE / Enter = MARK when heard\nEsc cancels without changing offset"
         )
     } else {
-        "←/→ ±5s · Shift+arrows ±30s\ng jump · z undo skip · click progress\ns TAP SYNC · V spectrum · o offset\np/Space pause · j/k lyrics · u undo tap".into()
+        let timeline = match app.lyrics.as_ref() {
+            Some(Document::Synced(lrc)) => {
+                let pad = lrc.padding(app.duration_ms, app.lyric_offset_ms);
+                if pad.lyrics_past_eof_ms > 0 {
+                    format!(
+                        "virtual lyric tail +{} (no audio modified)",
+                        format_time(pad.lyrics_past_eof_ms)
+                    )
+                } else if pad.blank_outro_ms > 1500 {
+                    format!(
+                        "blank lyric outro {} (audio unchanged)",
+                        format_time(pad.blank_outro_ms)
+                    )
+                } else if pad.blank_intro_ms > 1500 {
+                    format!("blank lyric intro {}", format_time(pad.blank_intro_ms))
+                } else {
+                    "Lyrics align within media time".into()
+                }
+            }
+            _ => "Paste manual LRCLIB track link with M".into(),
+        };
+        format!(
+            "←/→ ±5s · g jump · z undo skip\ns Tap Sync · M paste LRCLIB · U auto\no offset · L refresh · V spectrum\np/Space pause · j/k lyrics · u undo tap\n{timeline}"
+        )
     };
     frame.render_widget(
         Paragraph::new(controls)
@@ -2663,18 +2805,42 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
     } else {
         app.lyric_origin.as_str()
     };
+    let padding = app.lyrics.as_ref().and_then(|d| {
+        if let Document::Synced(lrc) = d {
+            Some(lrc.padding(app.duration_ms, app.lyric_offset_ms))
+        } else {
+            None
+        }
+    });
+    let timing_info = padding
+        .map(|p| {
+            if p.lyrics_past_eof_ms > 0 {
+                format!(
+                    " · virtual lyric tail +{} (no extra audio)",
+                    format_time(p.lyrics_past_eof_ms)
+                )
+            } else if p.blank_outro_ms > 1500 {
+                format!(" · blank outro {}", format_time(p.blank_outro_ms))
+            } else if p.blank_intro_ms > 1500 {
+                format!(" · blank intro {}", format_time(p.blank_intro_ms))
+            } else {
+                String::new()
+            }
+        })
+        .unwrap_or_default();
     let title = format!(
-        " {} · offset {} ",
+        " {} · offset {}{} ",
         if app.tap_sync {
             "TAP SYNC: choose a line"
         } else {
             state
         },
-        format_offset_ms(app.lyric_offset_ms)
+        format_offset_ms(app.lyric_offset_ms),
+        timing_info
     );
     let Some(doc) = app.lyrics.as_ref() else {
         let text = format!(
-            "\n\n{}\n\nLocal .lrc files are preferred.\nLRCLIB results are cached offline.\n\nPress L to search again.",
+            "\n\n{}\n\nPress M to paste an LRCLIB link.\nPress L to search again.",
             app.lyric_status
         );
         frame.render_widget(
@@ -2698,6 +2864,13 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
             } else {
                 app.lyric_cursor
             };
+            if active.is_none() && app.lyric_follow {
+                rendered.push(Line::from(Span::styled(
+                    "♪ Blank intro / waiting for vocals",
+                    Style::default().fg(MUTED),
+                )));
+                rendered.push(Line::raw(""));
+            }
             let before = visible / 2;
             let first = center.saturating_sub(before);
             let last = (first + visible).min(lrc.lines().len());
@@ -2748,7 +2921,14 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
                     rendered.push(Line::from(spans));
                 } else {
                     rendered.push(Line::from(Span::styled(
-                        format!("{mark}{}", line.text),
+                        format!(
+                            "{mark}{}",
+                            if line.text.trim().is_empty() && current {
+                                "♪ Instrumental / blank lyrics"
+                            } else {
+                                line.text.as_str()
+                            }
+                        ),
                         style,
                     )));
                 }

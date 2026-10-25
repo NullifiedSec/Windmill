@@ -2,7 +2,7 @@
 
 **Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Current status: v0.5.0 — playlist import, queue, YouTube Music, artwork, spectrum and local recommendations
+## Current status: v0.5.1 — manual LRCLIB selection and duration-aware blank lyrics
 
 The Rust terminal interface has six working views:
 
@@ -101,6 +101,8 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `Esc` | Cancel Tap Sync without changing the offset |
 | `u` | Undo the most recent successful Tap Sync mark |
 | `o` | Set exact signed lyrics offset (e.g. `+12.5` or `-00:03.250`) |
+| `M` (Now Playing) | Paste a specific LRCLIB track page link |
+| `U` (Now Playing) | Remove the pinned link; use automatic/local lyrics |
 | `[` / `]` | Lyrics earlier/later in 250 ms steps (Now Playing) |
 | `0` | Reset lyric offset (Now Playing) |
 | `j/k`, `Enter` | Browse lyric lines and seek to selected timed line (Now Playing) |
@@ -137,6 +139,21 @@ This avoids interrupting playback when capturing the exact moment.
 No need to estimate intro lengths. For finer control, `[` / `]` still
 adjust the result by 250 ms. This requires synchronized LRC/lyrics, not
 plain untimed text.
+
+### Manually pick LRCLIB lyrics, even if the durations differ
+
+If lyrics are missing or the wrong version was selected, press `M`
+in Now Playing and paste `https://lrclib.net/tracks/36174111`.
+Windmill fetches that record by ID, bypassing exact artist/title and
+duration matching, and remembers it for that recording. Offline cached
+lyrics work on downloaded copies too. `U` unpins it and returns to
+automatic search and local sidecar files.
+
+The lyric **display** has blank intro and instrumental/outro regions.
+If the chosen LRCLIB transcript is longer than the playing recording,
+Windmill indicates a *virtual lyric tail* beyond the real file.
+This does **not** extend or alter the actual music. Use Tap Sync or
+the offset editor to line up the words. See [lyrics guide](docs/LYRICS.md).
 
 ### Music-video lyric timing
 

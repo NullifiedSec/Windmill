@@ -57,6 +57,52 @@ impl Lyrics {
         lyrics.lines.sort_by_key(|line| line.at_ms);
         lyrics
     }
+    /// A synchronized transcript can end before the actual media does.
+    /// Explicitly append an empty timestamp so the last lyric stops
+    /// highlighting during an instrumental/outro. Never alter media bytes.
+    pub fn pad_blank_to(&mut self, duration_ms: i64) {
+        if duration_ms <= 0 || duration_ms > 7_200_000 {
+            return;
+        }
+        if self
+            .lines
+            .last()
+            .is_some_and(|last| last.at_ms < duration_ms)
+        {
+            self.lines.push(Line {
+                at_ms: duration_ms,
+                text: String::new(),
+                words: vec![],
+            });
+        }
+    }
+    /// Used by the TUI for non-destructive alignment and virtual padding.
+    /// A positive shift creates blank intro time; the remaining media after
+    /// the transcript is blank outro; lyrics past EOF remain on a virtual
+    /// timeline, they do not extend actual audio playback.
+    pub fn padding(&self, media_duration_ms: Option<i64>, user_offset_ms: i64) -> TimelinePadding {
+        let first = self.lines.first().map_or(0, |l| {
+            l.at_ms
+                .saturating_add(self.offset_ms)
+                .saturating_add(user_offset_ms)
+        });
+        let end = self.lines.last().map_or(0, |l| {
+            l.at_ms
+                .saturating_add(self.offset_ms)
+                .saturating_add(user_offset_ms)
+        });
+        let media_end = media_duration_ms.unwrap_or(0).max(0);
+        TimelinePadding {
+            blank_intro_ms: first.max(0),
+            blank_outro_ms: (media_end - end).max(0),
+            lyrics_past_eof_ms: if media_end > 0 {
+                (end - media_end).max(0)
+            } else {
+                0
+            },
+            virtual_end_ms: media_end.max(end).max(0),
+        }
+    }
     pub fn active_index(&self, elapsed_ms: i64) -> Option<usize> {
         let timeline_ms = elapsed_ms.saturating_sub(self.offset_ms);
         let next = self.lines.partition_point(|line| line.at_ms <= timeline_ms);
@@ -85,6 +131,13 @@ impl Lyrics {
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelinePadding {
+    pub blank_intro_ms: i64,
+    pub blank_outro_ms: i64,
+    pub lyrics_past_eof_ms: i64,
+    pub virtual_end_ms: i64,
 }
 /// Enhanced LRC: parse inline <mm:ss.xx> segments while keeping a clean
 /// text fallback. Malformed angle brackets remain literal text.
@@ -199,6 +252,22 @@ mod tests {
         assert_eq!(l.line_position_ms(0, 250), Some(1_350));
         assert_eq!(l.line_position_ms(3, 0), None);
         assert_eq!(l.active_index(1350), Some(0));
+    }
+    #[test]
+    fn virtual_padding_adds_silence_in_ui_not_in_actual_media() {
+        let mut lyric = Lyrics::parse("[00:20.00]Vocal starts\n[03:30.00]Last line");
+        lyric.pad_blank_to(237_000);
+        assert_eq!(lyric.lines().last().unwrap().text, "");
+        let layout = lyric.padding(Some(310_000), 20_000);
+        assert_eq!(layout.blank_intro_ms, 40_000);
+        assert_eq!(layout.blank_outro_ms, 53_000);
+        assert_eq!(layout.lyrics_past_eof_ms, 0);
+        assert_eq!(layout.virtual_end_ms, 310_000);
+        let too_short = lyric.padding(Some(220_000), 20_000);
+        assert_eq!(too_short.lyrics_past_eof_ms, 37_000);
+        assert_eq!(too_short.virtual_end_ms, 257_000);
+        assert_eq!(lyric.active_index(236_999), Some(1));
+        assert_eq!(lyric.active_index(237_000), Some(2));
     }
     #[test]
     fn empty_and_invalid_are_safe() {

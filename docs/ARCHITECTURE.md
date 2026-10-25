@@ -93,3 +93,19 @@ and local listening/quick-skip counts without cloud ranking. Artwork
 is cached in the private app data directory. Audio spectrum captures
 PCM from the playback sink monitor (which can include other applications);
 no microphone access or saved audio samples are involved.
+
+
+## Pinned LRCLIB sources
+
+A per-recording lyric_manual_sources SQLite row stores the validated
+numeric LRCLIB ID. Requests construct a fixed-origin HTTPS API URL,
+never using arbitrary pasted URLs, and verify the response ID.
+Only usable records are pinned and per-ID cached. Manual choices take
+precedence over local sidecars and fuzzy automatic search. The lyric
+request generation token prevents stale asynchronous fetch responses
+from overwriting newer track/link selections.
+
+The parser can insert a blank trailing lyric timestamp at the provider's
+duration. Playback and lyric durations contribute only to the visual
+padding/virtual tail calculations; the original file and true playback
+duration are never changed.

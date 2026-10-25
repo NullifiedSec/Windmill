@@ -201,3 +201,4 @@ default output sink monitor, not the microphone. Rate saved songs with
 See [full expansion guide](docs/EXPANSION.md).
 
 2026-10-25 - feature/windmill-release-prep - Added Now Playing spectrum toggle and user-scoped release installer, preserving main-worktree history.
+2026-10-25 - manual LRCLIB URL selection, pinned by source, ID-based offline cache, sidecar override, and virtual blank intro/outro durations. Playback untouched.

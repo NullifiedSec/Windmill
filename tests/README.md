@@ -68,3 +68,14 @@ remains separate.
 `python3 tests/playlist_integration.py` tests playlist preview,
 atomic import, idempotency, playlist order, explicit batch downloading
 and skipping completed files using fake yt-dlp and a temporary catalog.
+
+
+## Manual LRCLIB match and virtual blank lyric timeline
+
+`python3 tests/manual_lrclib_integration.py` validates the full TUI flow
+using disposable media, a fake provider and private SQLite storage:
+override local lyrics, persist per-source ID, restore cached lyrics
+offline, reject an invalid link, and unpin to restore local lyrics.
+Unit tests cover URL safety, private cache, timestamps and padding.
+An optional live-provider test may fail if LRCLIB throttles or returns
+HTTP 503; it is not part of the deterministic release suite.
