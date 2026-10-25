@@ -20,7 +20,8 @@ A canonical YouTube video identifier yields a public thumbnail from a fixed HTTP
 
 ## 5. Live speaker spectrum
 
-While playback is active, Windmill uses `pactl` and `parec` to capture PCM samples from the *default speaker/output sink monitor*. Rust Goertzel processing computes 16 spectral bands, with no recording to disk, network transfer, or microphone capture. The monitor reflects *all audio on that sink*, not exclusively Windmill. If the output monitor is absent the visualizer is unavailable; playback remains functional. Tests disable actual capture and use a fake PCM source instead.
+While playback is active, Windmill uses `pactl` and `parec` to capture PCM samples from the *default speaker/output sink monitor*. Rust Goertzel processing computes 16 spectral bands, with no recording to disk, network transfer, or microphone capture. The monitor reflects *all audio on that sink*, not exclusively Windmill. If the output monitor is absent the visualizer is unavailable; playback remains functional. Press `V` while in
+Now Playing to toggle the spectrum without stopping the song. Tests disable actual capture and use a fake PCM source instead.
 
 ## 6. Local listening recommendations
 
@@ -37,3 +38,13 @@ For You uses tag overlaps, local listening/quick-skip counts, and explicit likes
 `python3 tests/lyrics_integration.py` and `python3 tests/video_lyrics_offset_integration.py`: lyrics and time offsets.
 
 Remaining for future: interrupted download recovery, cancellation and fine-grained progress, local media scanning, metadata correction, broader cover overrides, and fully audible output-device testing.
+
+
+## Installed command
+
+Run `./scripts/install-user` from the main checkout to compile and
+atomically install an optimized binary at `~/.local/bin/windmill`. The
+installer never invokes sudo and refuses to overwrite an unrelated
+executable. Public Music browsing is installed separately via
+`./scripts/setup-ytmusic`; missing Python dependencies do not prevent
+offline playback.

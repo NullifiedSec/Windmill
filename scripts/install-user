@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Install the exact tested Windmill source as an unprivileged user command.
+set -euo pipefail
+
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo"
+
+if [[ -x "$repo/.tools/cargo/bin/cargo" ]]; then
+    export CARGO_HOME="$repo/.tools/cargo"
+    export RUSTUP_HOME="$repo/.tools/rustup"
+    export PATH="$CARGO_HOME/bin:$PATH"
+fi
+command -v cargo >/dev/null || { echo "Rust/Cargo is required" >&2; exit 1; }
+
+echo "Building Windmill from the checked-out source..."
+cargo build --release --locked
+
+target_dir="$HOME/.local/bin"
+target="$target_dir/windmill"
+mkdir -p "$target_dir"
+if [[ -e "$target" && ! -f "$target" ]]; then
+    echo "Refusing to overwrite non-file destination: $target" >&2
+    exit 1
+fi
+if [[ -e "$target" ]] && ! "$target" help 2>/dev/null | grep -q '^Windmill '; then
+    echo "Refusing to overwrite an unrelated binary at $target" >&2
+    exit 1
+fi
+
+tmp="$(mktemp "$target_dir/.windmill-install.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+install -m 0755 "$repo/target/release/windmill" "$tmp"
+mv -f "$tmp" "$target"
+echo "Installed: $target"
+echo "Launch with: windmill"
+echo "Optional Music browsing: ./scripts/setup-ytmusic"

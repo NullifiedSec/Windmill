@@ -18,6 +18,31 @@ The CLI and TUI support user-initiated offline audio/video downloads. Downloaded
 
 **Not finished:** resumable/cancellable batch jobs, local media scanning, more robust queue error recovery, and fully audible output-device testing. YouTube Music lookup uses an optional isolated public API bridge.
 
+## Install for everyday use (Arch Linux)
+
+The standard development checkout is `~/Documents/windmill`. To install
+the tested release under your own account (no root or system packages):
+
+~~~sh
+cd ~/Documents/windmill
+./scripts/setup-ytmusic        # optional, public YouTube Music browsing
+./scripts/install-user         # optimized Rust binary in ~/.local/bin
+windmill                       # starts the TUI
+~~~
+
+Artwork is fetched and cached automatically when a song is playing;
+the speaker-output spectrum starts automatically when playback is active.
+Press `V` in Now Playing to toggle it. It observes the current default
+speaker monitor, **not a microphone**. Set
+`WINDMILL_DISABLE_VISUALIZER=1` if you want to disable any real PCM
+monitor capture entirely.
+
+Data is stored separately in `~/.local/share/windmill`, and upgrading
+the executable does not delete your media, lyric offsets or collections.
+Back up the SQLite library before major upgrades. If your user-level
+MPD service is stopped, run `systemctl --user start mpd.service`.
+Run `./scripts/dev` to compile and launch directly from the repository.
+
 ## Run on the development workstation
 
 ~~~sh
@@ -43,6 +68,7 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `P` | Preview a public playlist (Discover/Collections) |
 | `Y` | Search public YouTube Music (songs, albums, artists, playlists) |
 | `6` | Open persistent Queue tab |
+| `V` (Now Playing) | Toggle the real-time speaker-output spectrum |
 | `e` | Enqueue current media |
 | `Q` | In Collections, replace queue with the selected collection |
 | `n` / `b` | Next / previous queued track |

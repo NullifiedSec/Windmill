@@ -222,6 +222,7 @@ pub struct App {
     art_tx: Sender<ArtResponse>,
     art_rx: Receiver<ArtResponse>,
     spectrum: Option<visualizer::Spectrum>,
+    spectrum_enabled: bool,
     spectrum_attempted: bool,
     spectrum_bands: [f32; 16],
     rx: Receiver<SearchResponse>,
@@ -305,6 +306,7 @@ impl App {
             art_tx,
             art_rx,
             spectrum: None,
+            spectrum_enabled: true,
             spectrum_attempted: false,
             spectrum_bands: [0.; 16],
             tx,
@@ -1775,6 +1777,7 @@ impl App {
             KeyCode::Char('V') if self.tab == Tab::Discover && self.playlist_preview.is_some() => {
                 self.batch_download(Kind::Video)
             }
+            KeyCode::Char('V') if self.tab == Tab::Playing => self.toggle_spectrum(),
             KeyCode::Char('/') => self.prompt = Some(Prompt::Search(self.search.clone())),
             KeyCode::Char('f') if self.tab == Tab::ForYou => {
                 self.prompt = Some(Prompt::Filter(self.filter_tags.join(",")))
@@ -1841,6 +1844,16 @@ impl App {
         };
         false
     }
+    fn toggle_spectrum(&mut self) {
+        self.spectrum_enabled = !self.spectrum_enabled;
+        self.spectrum = None;
+        self.spectrum_bands = [0.; 16];
+        self.spectrum_attempted = false;
+        self.status = format!(
+            "Audio-reactive output spectrum: {}",
+            if self.spectrum_enabled { "ON" } else { "OFF" }
+        );
+    }
     fn tick(&mut self) {
         let active = self.player.engine.is_some()
             || self
@@ -1850,12 +1863,13 @@ impl App {
         if active
             && self.spectrum.is_none()
             && !self.spectrum_attempted
+            && self.spectrum_enabled
             && std::env::var_os("WINDMILL_DISABLE_VISUALIZER").is_none()
         {
             self.spectrum_attempted = true;
             self.spectrum = visualizer::Spectrum::start().ok();
         }
-        if !active {
+        if !active || !self.spectrum_enabled {
             self.spectrum = None;
             self.spectrum_bands = [0.; 16];
             self.spectrum_attempted = false;
@@ -2626,7 +2640,7 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
             "SELECTED: {cue}\np PLAY / PAUSE · j/k choose a lyric\nSPACE / Enter = MARK when heard\nEsc cancels without changing offset"
         )
     } else {
-        "←/→ ±5s · Shift+arrows ±30s\ng jump · z undo skip · click progress\ns TAP SYNC · p/Space pause · o offset\nj/k lyrics · Enter line · u undo tap".into()
+        "←/→ ±5s · Shift+arrows ±30s\ng jump · z undo skip · click progress\ns TAP SYNC · V spectrum · o offset\np/Space pause · j/k lyrics · u undo tap".into()
     };
     frame.render_widget(
         Paragraph::new(controls)
@@ -2832,6 +2846,19 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.tap_sync);
         assert_eq!(app.store.lyrics_offset("source").unwrap(), 0);
+    }
+    #[test]
+    fn visualizer_toggle_resets_capture_and_levels() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut app = App::new(store).unwrap();
+        app.tab = Tab::Playing;
+        app.spectrum_bands[2] = 0.95;
+        assert!(app.spectrum_enabled);
+        app.key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE));
+        assert!(!app.spectrum_enabled);
+        assert_eq!(app.spectrum_bands, [0.; 16]);
+        app.key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE));
+        assert!(app.spectrum_enabled);
     }
     #[test]
     fn video_lyrics_use_original_identity_and_allow_precise_edits() {
