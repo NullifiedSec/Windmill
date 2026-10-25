@@ -1,13 +1,17 @@
 //! Interactive Windmill terminal front end. No application-specific background daemon.
 use crate::{
+    art,
     download::{self, Kind},
     lyric_offset::{MAX_ABS_OFFSET_MS, format_offset_ms, offset_from_cue, parse_offset_ms},
     lyric_source::{self, Document, Loaded, Request},
     mpris::{self, Control, Snapshot},
     player::{self, Engine, Playback, Status},
+    playlist::{self, Playlist},
     seek::{self, clamp_target, format_time, parse_time_ms},
     store::{Media, Store},
+    visualizer,
     youtube::{self, Video},
+    ytmusic::{self, MusicItem},
 };
 use crossterm::{
     event::{
@@ -26,6 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
 use std::{
+    collections::BTreeSet,
     error::Error,
     io::{self, IsTerminal},
     path::Path,
@@ -34,12 +39,13 @@ use std::{
 };
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-const TITLES: [&str; 5] = [
+const TITLES: [&str; 6] = [
     "Library",
     "Discover",
     "Collections",
     "For You",
     "Now Playing",
+    "Queue",
 ];
 const ACCENT: Color = Color::Rgb(186, 216, 165);
 const MUTED: Color = Color::Rgb(150, 156, 171);
@@ -52,6 +58,7 @@ enum Tab {
     Collections,
     ForYou,
     Playing,
+    Queue,
 }
 impl Tab {
     fn index(self) -> usize {
@@ -61,15 +68,17 @@ impl Tab {
             Self::Collections => 2,
             Self::ForYou => 3,
             Self::Playing => 4,
+            Self::Queue => 5,
         }
     }
     fn from_index(i: usize) -> Self {
-        match i % 5 {
+        match i % 6 {
             0 => Self::Library,
             1 => Self::Discover,
             2 => Self::Collections,
             3 => Self::ForYou,
-            _ => Self::Playing,
+            4 => Self::Playing,
+            _ => Self::Queue,
         }
     }
 }
@@ -81,6 +90,8 @@ enum Prompt {
     Filter(String),
     LyricOffset(String),
     JumpTime(String),
+    PlaylistUrl(String),
+    MusicQuery(String),
 }
 impl Prompt {
     fn text(&self) -> &str {
@@ -90,7 +101,9 @@ impl Prompt {
             | Self::Collection(t)
             | Self::Filter(t)
             | Self::LyricOffset(t)
-            | Self::JumpTime(t) => t,
+            | Self::JumpTime(t)
+            | Self::PlaylistUrl(t)
+            | Self::MusicQuery(t) => t,
         }
     }
     fn text_mut(&mut self) -> &mut String {
@@ -100,7 +113,9 @@ impl Prompt {
             | Self::Collection(t)
             | Self::Filter(t)
             | Self::LyricOffset(t)
-            | Self::JumpTime(t) => t,
+            | Self::JumpTime(t)
+            | Self::PlaylistUrl(t)
+            | Self::MusicQuery(t) => t,
         }
     }
     fn label(&self) -> &str {
@@ -111,6 +126,8 @@ impl Prompt {
             Self::Filter(_) => "Recommendation tags, comma-separated",
             Self::LyricOffset(_) => "Lyrics offset (+seconds or -mm:ss.sss) — Enter saves",
             Self::JumpTime(_) => "Jump to playback time (seconds, m:ss, h:mm:ss)",
+            Self::PlaylistUrl(_) => "Public YouTube / YouTube Music playlist URL",
+            Self::MusicQuery(_) => "YouTube Music search (songs:/albums:/artists:/playlists:query)",
         }
     }
 }
@@ -122,6 +139,23 @@ struct DownloadResponse {
     media_id: i64,
     kind: Kind,
     result: std::result::Result<std::path::PathBuf, String>,
+    batch: Option<(usize, usize)>,
+}
+struct MusicResponse {
+    query: String,
+    result: std::result::Result<Vec<MusicItem>, String>,
+}
+struct MusicBrowseResponse {
+    key: String,
+    result: std::result::Result<(String, Vec<Video>), String>,
+}
+struct ArtResponse {
+    key: String,
+    result: std::result::Result<Option<Vec<Line<'static>>>, String>,
+}
+struct PlaylistResponse {
+    url: String,
+    result: std::result::Result<Playlist, String>,
 }
 struct SearchResponse {
     query: String,
@@ -131,11 +165,35 @@ pub struct App {
     store: Store,
     tab: Tab,
     selected: [usize; 4],
+    queue_selected: usize,
+    queue: Vec<(i64, Media)>,
+    queue_active: Option<i64>,
+    queue_repeat: bool,
+    queue_shuffle_tick: u64,
+    listening: Option<i64>,
+    listened_ms: i64,
+    listening_last: Instant,
     media: Vec<Media>,
     collections: Vec<String>,
     recommendations: Vec<(i64, Media)>,
     filter_tags: Vec<String>,
     found: Vec<Video>,
+    playlist_preview: Option<Playlist>,
+    music_items: Option<Vec<MusicItem>>,
+    music_pending: bool,
+    music_query: String,
+    music_tx: Sender<MusicResponse>,
+    music_rx: Receiver<MusicResponse>,
+    browse_tx: Sender<MusicBrowseResponse>,
+    browse_rx: Receiver<MusicBrowseResponse>,
+    browse_key: String,
+    playlist_selected: BTreeSet<usize>,
+    playlist_loading: bool,
+    playlist_url: String,
+    playlist_tx: Sender<PlaylistResponse>,
+    playlist_rx: Receiver<PlaylistResponse>,
+    batch_running: bool,
+    batch_failed: usize,
     search: String,
     pending: bool,
     prompt: Option<Prompt>,
@@ -158,6 +216,14 @@ pub struct App {
     lyric_tx: Sender<LyricResponse>,
     lyric_rx: Receiver<LyricResponse>,
     duration_ms: Option<i64>,
+    art_key: Option<String>,
+    art_lines: Vec<Line<'static>>,
+    art_pending: bool,
+    art_tx: Sender<ArtResponse>,
+    art_rx: Receiver<ArtResponse>,
+    spectrum: Option<visualizer::Spectrum>,
+    spectrum_attempted: bool,
+    spectrum_bands: [f32; 16],
     rx: Receiver<SearchResponse>,
     tx: Sender<SearchResponse>,
     last_tick: Instant,
@@ -169,7 +235,12 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let (download_tx, download_rx) = mpsc::channel();
         let (lyric_tx, lyric_rx) = mpsc::channel();
+        let (playlist_tx, playlist_rx) = mpsc::channel();
+        let (art_tx, art_rx) = mpsc::channel();
+        let (music_tx, music_rx) = mpsc::channel();
+        let (browse_tx, browse_rx) = mpsc::channel();
         let media = store.all()?;
+        let queue = store.queue_entries()?;
         let collections = store.collections()?;
         let tags = store.top_tags(6)?;
         let recommendations = store.recommend(tags.iter().map(String::as_str))?;
@@ -177,11 +248,35 @@ impl App {
             store,
             tab: Tab::Library,
             selected: [0; 4],
+            queue_selected: 0,
+            queue,
+            queue_active: None,
+            queue_repeat: false,
+            queue_shuffle_tick: 0,
+            listening: None,
+            listened_ms: 0,
+            listening_last: Instant::now(),
             media,
             collections,
             recommendations,
             filter_tags: vec![],
             found: vec![],
+            playlist_preview: None,
+            music_items: None,
+            music_pending: false,
+            music_query: String::new(),
+            music_tx,
+            music_rx,
+            browse_tx,
+            browse_rx,
+            browse_key: String::new(),
+            playlist_selected: BTreeSet::new(),
+            playlist_loading: false,
+            playlist_url: String::new(),
+            playlist_tx,
+            playlist_rx,
+            batch_running: false,
+            batch_failed: 0,
             search: String::new(),
             pending: false,
             prompt: None,
@@ -204,6 +299,14 @@ impl App {
             lyric_tx,
             lyric_rx,
             duration_ms: None,
+            art_key: None,
+            art_lines: vec![],
+            art_pending: false,
+            art_tx,
+            art_rx,
+            spectrum: None,
+            spectrum_attempted: false,
+            spectrum_bands: [0.; 16],
             tx,
             rx,
             download_tx,
@@ -223,11 +326,21 @@ impl App {
     }
     fn reload(&mut self) -> Result<()> {
         self.media = self.store.all()?;
+        self.queue = self.store.queue_entries()?;
+        self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+        if self
+            .queue_active
+            .is_some_and(|id| !self.queue.iter().any(|(row, _)| *row == id))
+        {
+            self.queue_active = None;
+        }
         self.collections = self.store.collections()?;
         self.rebuild_recommendations()?;
         for (i, len) in [
             self.media.len(),
-            self.found.len(),
+            self.playlist_preview
+                .as_ref()
+                .map_or(self.found.len(), |p| p.entries.len()),
             self.collections.len(),
             self.recommendations.len(),
         ]
@@ -242,7 +355,194 @@ impl App {
         self.media.get(self.selected[0])
     }
     fn selected_video(&self) -> Option<&Video> {
-        self.found.get(self.selected[1])
+        if let Some(playlist) = self.playlist_preview.as_ref() {
+            playlist.entries.get(self.selected[1])
+        } else if let Some(items) = self.music_items.as_ref() {
+            items.get(self.selected[1]).and_then(|i| i.song.as_ref())
+        } else {
+            self.found.get(self.selected[1])
+        }
+    }
+    fn playlist_entries_selected(&self) -> Vec<Video> {
+        let Some(playlist) = self.playlist_preview.as_ref() else {
+            return vec![];
+        };
+        self.playlist_selected
+            .iter()
+            .filter_map(|i| playlist.entries.get(*i).cloned())
+            .collect()
+    }
+    fn start_music_search(&mut self, input: String) {
+        let input = input.trim();
+        let (kind, query) = input
+            .split_once(':')
+            .filter(|(part, _)| ["songs", "albums", "artists", "playlists"].contains(part))
+            .unwrap_or(("songs", input));
+        if query.trim().is_empty() {
+            self.status = "Enter a YouTube Music query".into();
+            return;
+        }
+        self.music_query = format!("{kind}:{query}");
+        self.music_pending = true;
+        self.playlist_preview = None;
+        self.playlist_selected.clear();
+        self.tab = Tab::Discover;
+        self.status = format!("Searching YouTube Music {kind}...");
+        let request = self.music_query.clone();
+        let tx = self.music_tx.clone();
+        let query = query.to_owned();
+        let kind = kind.to_owned();
+        std::thread::spawn(move || {
+            let result = ytmusic::search(&kind, &query).map_err(|e| e.to_string());
+            let _ = tx.send(MusicResponse {
+                query: request,
+                result,
+            });
+        });
+    }
+    fn open_music_selection(&mut self) {
+        let Some(item) = self
+            .music_items
+            .as_ref()
+            .and_then(|r| r.get(self.selected[1]))
+            .cloned()
+        else {
+            return;
+        };
+        match item.kind.as_str() {
+            "songs" => self.play(false),
+            "playlists" => self.start_playlist_preview(item.url),
+            "albums" | "artists" => {
+                self.browse_key = format!("{}:{}", item.kind, item.id);
+                self.status = format!("Fetching public {} tracks: {}", item.kind, item.title);
+                let tx = self.browse_tx.clone();
+                let key = self.browse_key.clone();
+                std::thread::spawn(move || {
+                    let result = ytmusic::browse(&item.kind, &item.id).map_err(|e| e.to_string());
+                    let _ = tx.send(MusicBrowseResponse { key, result });
+                });
+            }
+            _ => {}
+        }
+    }
+    fn start_playlist_preview(&mut self, url: String) {
+        let canonical = match playlist::canonical_url(&url) {
+            Ok(value) => value,
+            Err(e) => {
+                self.message_error(e);
+                return;
+            }
+        };
+        self.playlist_loading = true;
+        self.music_items = None;
+        self.playlist_url = canonical.clone();
+        self.status = "Fetching playlist metadata (no downloads)...".into();
+        self.tab = Tab::Discover;
+        let tx = self.playlist_tx.clone();
+        std::thread::spawn(move || {
+            let result = playlist::fetch(&canonical).map_err(|e| e.to_string());
+            let _ = tx.send(PlaylistResponse {
+                url: canonical,
+                result,
+            });
+        });
+    }
+    fn import_playlist_selection(&mut self) -> Option<Vec<(i64, Video)>> {
+        let selected = self.playlist_entries_selected();
+        let Some(playlist) = self.playlist_preview.as_ref() else {
+            self.status = "Paste a playlist URL with P first".into();
+            return None;
+        };
+        if selected.is_empty() {
+            self.status = "Select tracks with a / A before importing".into();
+            return None;
+        }
+        let name = playlist.title.clone();
+        match self.store.import_playlist(&name, &selected) {
+            Ok(added) => {
+                let tracks = selected
+                    .into_iter()
+                    .filter_map(|video| {
+                        // Import just committed, so IDs must be present in the store.
+                        self.store
+                            .all()
+                            .ok()?
+                            .into_iter()
+                            .find(|m| m.source == video.url)
+                            .map(|m| (m.id, video))
+                    })
+                    .collect::<Vec<_>>();
+                if let Err(e) = self.reload() {
+                    self.message_error(e)
+                }
+                self.status = format!(
+                    "Imported {} selected tracks into {name} ({} new)",
+                    tracks.len(),
+                    added
+                );
+                Some(tracks)
+            }
+            Err(e) => {
+                self.message_error(e);
+                None
+            }
+        }
+    }
+    fn batch_download(&mut self, kind: Kind) {
+        if self.batch_running {
+            self.status = "An existing batch download is still running".into();
+            return;
+        }
+        let Some(items) = self.import_playlist_selection() else {
+            return;
+        };
+        let filtered = items
+            .into_iter()
+            .filter(|(id, _)| {
+                !self
+                    .store
+                    .asset(*id, kind.as_str())
+                    .ok()
+                    .flatten()
+                    .is_some_and(|f| Path::new(&f).is_file())
+            })
+            .collect::<Vec<_>>();
+        if filtered.is_empty() {
+            self.status = "Every selected item is already downloaded".into();
+            return;
+        }
+        let data_dir = match crate::data_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                self.message_error(e);
+                return;
+            }
+        };
+        self.batch_running = true;
+        self.batch_failed = 0;
+        let total = filtered.len();
+        self.status = format!(
+            "Downloading {total} {} tracks in the background...",
+            kind.as_str()
+        );
+        let tx = self.download_tx.clone();
+        std::thread::spawn(move || {
+            for (index, (id, video)) in filtered.into_iter().enumerate() {
+                let result =
+                    download::fetch(id, &video.url, kind, &data_dir).map_err(|e| e.to_string());
+                if tx
+                    .send(DownloadResponse {
+                        media_id: id,
+                        kind,
+                        result,
+                        batch: Some((index + 1, total)),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
     }
     fn message_error(&mut self, err: impl std::fmt::Display) {
         self.status = format!("Error: {err}");
@@ -250,10 +550,23 @@ impl App {
     fn choose(&mut self, delta: isize) {
         let (idx, len) = match self.tab {
             Tab::Library => (0, self.media.len()),
-            Tab::Discover => (1, self.found.len()),
+            Tab::Discover => (
+                1,
+                self.playlist_preview
+                    .as_ref()
+                    .map_or(self.found.len(), |p| p.entries.len()),
+            ),
             Tab::Collections => (2, self.collections.len()),
             Tab::ForYou => (3, self.recommendations.len()),
             Tab::Playing => return,
+            Tab::Queue => {
+                if !self.queue.is_empty() {
+                    self.queue_selected = (self.queue_selected as isize + delta)
+                        .clamp(0, self.queue.len().saturating_sub(1) as isize)
+                        as usize;
+                }
+                return;
+            }
         };
         if len == 0 {
             self.selected[idx] = 0;
@@ -275,6 +588,7 @@ impl App {
                 .recommendations
                 .get(self.selected[3])
                 .map(|(_, m)| m.clone()),
+            Tab::Queue => self.queue.get(self.queue_selected).map(|(_, m)| m.clone()),
             _ => None,
         }
     }
@@ -329,6 +643,56 @@ impl App {
             request.artist = media.creator.clone();
         }
         Some(request)
+    }
+    fn load_art(&mut self) {
+        let source = if self.player.engine == Some(Engine::Mpv) {
+            self.player.active.as_ref().map(|m| {
+                if m.id > 0 {
+                    self.store
+                        .get(m.id)
+                        .map(|v| v.source)
+                        .unwrap_or_else(|_| m.source.clone())
+                } else {
+                    m.source.clone()
+                }
+            })
+        } else {
+            self.mpd
+                .as_ref()
+                .and_then(|s| s.file.as_ref())
+                .and_then(|file| {
+                    player::music_dir()
+                        .ok()
+                        .map(|root| root.join(file).to_string_lossy().into_owned())
+                })
+        };
+        let Some(source) = source else {
+            self.art_lines.clear();
+            self.art_key = None;
+            self.art_pending = false;
+            return;
+        };
+        if self.art_key.as_ref() == Some(&source) {
+            return;
+        }
+        self.art_key = Some(source.clone());
+        self.art_lines.clear();
+        self.art_pending = true;
+        let data = match crate::data_dir() {
+            Ok(dir) => dir,
+            Err(_) => {
+                self.art_pending = false;
+                return;
+            }
+        };
+        let tx = self.art_tx.clone();
+        std::thread::spawn(move || {
+            let result = art::get(&source, &data).map_err(|e| e.to_string());
+            let _ = tx.send(ArtResponse {
+                key: source,
+                result,
+            });
+        });
     }
     fn load_lyrics(&mut self, refresh: bool) {
         let Some(request) = self.current_lyric_request() else {
@@ -695,45 +1059,282 @@ impl App {
                 media_id: id,
                 kind,
                 result,
+                batch: None,
             });
         });
     }
-    fn play(&mut self, mpd: bool) {
-        if let Some(mut media) = self.active_media() {
-            if !mpd && media.id > 0 {
-                let file = self
-                    .store
-                    .asset(media.id, "video")
-                    .ok()
-                    .flatten()
-                    .or_else(|| self.store.asset(media.id, "audio").ok().flatten());
-                if let Some(file) = file.filter(|s| Path::new(s).is_file()) {
-                    media.source = file;
+    fn update_listening(&mut self) {
+        let now = Instant::now();
+        let active = match self.player.engine {
+            Some(Engine::Mpv) => !self.player.paused,
+            Some(Engine::Mpd) => self.mpd.as_ref().is_some_and(|s| s.state == "play"),
+            None => false,
+        };
+        if self.listening.is_some() && active {
+            self.listened_ms = self.listened_ms.saturating_add(
+                now.duration_since(self.listening_last)
+                    .as_millis()
+                    .min(1200) as i64,
+            );
+        }
+        self.listening_last = now;
+    }
+    fn finish_listening(&mut self) {
+        if let Some(media_id) = self.listening.take() {
+            let seconds = self.listened_ms / 1000;
+            if seconds >= 1 {
+                if let Err(e) = self.store.record_listen(media_id, seconds) {
+                    self.message_error(e)
                 }
+                let _ = self.rebuild_recommendations();
             }
-            let result = if mpd {
-                self.player.play_mpd(&media)
-            } else {
-                self.player.play_mpv(&media)
-            };
-            match result {
-                Ok(()) => {
-                    self.tap_sync = false;
-                    self.seek_undo = None;
-                    self.duration_ms = None;
-                    self.mpd = player::mpd_status().ok();
-                    self.load_lyrics(false);
-                    self.status = format!(
-                        "Playing: {} [{}]",
-                        media.title,
-                        if mpd { "MPD" } else { "mpv" }
-                    );
-                    self.tab = Tab::Playing;
-                }
-                Err(e) => self.message_error(e),
-            }
+        }
+        self.listened_ms = 0;
+        self.listening_last = Instant::now();
+    }
+    fn rate_media(&mut self, rating: i64) {
+        let selected = if self.tab == Tab::Playing {
+            self.player.active.clone()
         } else {
+            self.active_media()
+        };
+        let Some(media) = selected else {
+            self.status = "Select a saved song to rate".into();
+            return;
+        };
+        let id = if media.id > 0 {
+            media.id
+        } else {
+            self.store
+                .all()
+                .ok()
+                .and_then(|all| {
+                    all.into_iter()
+                        .find(|m| m.source == media.source)
+                        .map(|m| m.id)
+                })
+                .unwrap_or(0)
+        };
+        if id <= 0 {
+            self.status = "Save this song to the library before rating".into();
+            return;
+        }
+        match self.store.rate(id, rating) {
+            Ok(()) => {
+                if let Err(e) = self.reload() {
+                    self.message_error(e)
+                }
+                self.status = format!(
+                    "{}: {}",
+                    match rating {
+                        1 => "Liked",
+                        -1 => "Disliked",
+                        _ => "Reset rating",
+                    },
+                    media.title
+                );
+            }
+            Err(e) => self.message_error(e),
+        }
+    }
+    fn start_media(&mut self, mut media: Media, mpd: bool) -> bool {
+        if !mpd && media.id > 0 {
+            let file = self
+                .store
+                .asset(media.id, "video")
+                .ok()
+                .flatten()
+                .filter(|f| Path::new(f).is_file())
+                .or_else(|| {
+                    self.store
+                        .asset(media.id, "audio")
+                        .ok()
+                        .flatten()
+                        .filter(|f| Path::new(f).is_file())
+                });
+            if let Some(file) = file {
+                media.source = file
+            }
+        }
+        self.finish_listening();
+        let original_id = media.id;
+        let result = if mpd {
+            self.player.play_mpd(&media)
+        } else {
+            self.player.play_mpv(&media)
+        };
+        match result {
+            Ok(()) => {
+                self.listening = (original_id > 0).then_some(original_id);
+                self.listened_ms = 0;
+                self.listening_last = Instant::now();
+                self.tap_sync = false;
+                self.seek_undo = None;
+                self.duration_ms = None;
+                self.elapsed_ms = Some(0);
+                self.mpd = player::mpd_status().ok();
+                self.load_lyrics(false);
+                self.status = format!(
+                    "Playing: {} [{}]",
+                    media.title,
+                    if mpd { "MPD" } else { "mpv" }
+                );
+                self.tab = Tab::Playing;
+                true
+            }
+            Err(e) => {
+                self.message_error(e);
+                false
+            }
+        }
+    }
+    fn play(&mut self, mpd: bool) {
+        let Some(media) = self.active_media() else {
             self.status = "Select a media item first".into();
+            return;
+        };
+        if self.start_media(media, mpd) {
+            self.queue_active = None; // Standalone playback is independent of queued items.
+        }
+    }
+    fn play_queue(&mut self, index: usize) -> bool {
+        let Some((row, media)) = self.queue.get(index).cloned() else {
+            self.status = "The queue is empty".into();
+            return false;
+        };
+        let mpd = std::path::Path::new(&media.source).is_file()
+            && player::mpd_relative(&media.source).is_ok();
+        if self.start_media(media, mpd) {
+            self.queue_active = Some(row);
+            self.queue_selected = index;
+            true
+        } else {
+            false
+        }
+    }
+    fn enqueue_current(&mut self) {
+        let Some(media) = self.active_media() else {
+            self.status = "Select a track to enqueue".into();
+            return;
+        };
+        let id = if media.id > 0 {
+            media.id
+        } else {
+            match self.store.add(&media.source, &media.title, &media.creator) {
+                Ok(id) => id,
+                Err(e) => {
+                    self.message_error(e);
+                    return;
+                }
+            }
+        };
+        match self.store.queue_add(id) {
+            Ok(_) => {
+                if let Err(e) = self.reload() {
+                    self.message_error(e)
+                }
+                self.status = format!(
+                    "Added to queue: {} ({} tracks)",
+                    media.title,
+                    self.queue.len()
+                );
+            }
+            Err(e) => self.message_error(e),
+        }
+    }
+    fn queue_step(&mut self, direction: isize) {
+        if self.queue.is_empty() {
+            if let Err(e) = if direction > 0 {
+                self.player.next()
+            } else {
+                self.player.previous()
+            } {
+                self.message_error(e)
+            }
+            return;
+        }
+        let position = self
+            .queue_active
+            .and_then(|id| self.queue.iter().position(|(row, _)| *row == id));
+        let target = match position {
+            Some(index) => {
+                let next = index as isize + direction;
+                if next < 0 {
+                    if self.queue_repeat {
+                        self.queue.len() - 1
+                    } else {
+                        0
+                    }
+                } else if next >= self.queue.len() as isize {
+                    if self.queue_repeat {
+                        0
+                    } else {
+                        self.queue_active = None;
+                        self.finish_listening();
+                        self.player.stop();
+                        self.status = "End of queue. Press 6 to replay.".into();
+                        return;
+                    }
+                } else {
+                    next as usize
+                }
+            }
+            None => {
+                if direction >= 0 {
+                    0
+                } else {
+                    self.queue.len() - 1
+                }
+            }
+        };
+        self.play_queue(target);
+    }
+    fn reorder_queue(&mut self, step: isize) {
+        if self.queue.len() < 2 {
+            return;
+        }
+        let here = self.queue_selected;
+        let to = (here as isize + step).clamp(0, self.queue.len() as isize - 1) as usize;
+        if here == to {
+            return;
+        }
+        let mut ids = self.queue.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        ids.swap(here, to);
+        match self.store.queue_reorder(&ids) {
+            Ok(()) => {
+                self.queue_selected = to;
+                if let Err(e) = self.reload() {
+                    self.message_error(e)
+                }
+                self.status = "Queue order saved".into();
+            }
+            Err(e) => self.message_error(e),
+        }
+    }
+    fn shuffle_queue(&mut self) {
+        if self.queue.len() < 2 {
+            return;
+        }
+        use std::hash::{Hash, Hasher};
+        self.queue_shuffle_tick = self.queue_shuffle_tick.saturating_add(1);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut ids = self.queue.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        ids.sort_by_key(|id| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (id, nonce, self.queue_shuffle_tick).hash(&mut h);
+            h.finish()
+        });
+        match self.store.queue_reorder(&ids) {
+            Ok(()) => {
+                if let Err(e) = self.reload() {
+                    self.message_error(e)
+                }
+                self.status = "Queue shuffled (saved)".into();
+            }
+            Err(e) => self.message_error(e),
         }
     }
     fn search(&mut self, query: String) {
@@ -742,6 +1343,9 @@ impl App {
             return;
         }
         self.search = query.clone();
+        self.playlist_preview = None;
+        self.music_items = None;
+        self.playlist_selected.clear();
         self.tab = Tab::Discover;
         self.pending = true;
         self.found.clear();
@@ -762,6 +1366,8 @@ impl App {
         }
         match prompt {
             Prompt::Search(value) => self.search(value),
+            Prompt::PlaylistUrl(url) => self.start_playlist_preview(url),
+            Prompt::MusicQuery(input) => self.start_music_search(input),
             Prompt::Tag(value) => {
                 if let Some(id) = self.selected_media().map(|m| m.id) {
                     match self.store.tag(id, value.trim()) {
@@ -863,6 +1469,12 @@ impl App {
         } else {
             self.elapsed_ms.or_else(|| mpd.map(|s| s.elapsed_ms))
         };
+        if let Some(row) = self.queue_active
+            && let Some(pos) = self.queue.iter().position(|(id, _)| *id == row)
+        {
+            snap.can_go_next = pos + 1 < self.queue.len() || self.queue_repeat;
+            snap.can_go_previous = pos > 0 || self.queue_repeat;
+        }
         snap.position_us = elapsed.unwrap_or(0).saturating_mul(1000);
         snap
     }
@@ -881,13 +1493,29 @@ impl App {
             Control::Pause => self.player.pause(),
             Control::Toggle => self.player.toggle(),
             Control::Stop => {
+                self.finish_listening();
                 self.player.stop();
+                self.queue_active = None;
                 self.elapsed_ms = None;
                 self.status = "Playback stopped by media control".into();
                 Ok(())
             }
-            Control::Next => self.player.next(),
-            Control::Previous => self.player.previous(),
+            Control::Next => {
+                if self.queue_active.is_some() {
+                    self.queue_step(1);
+                    Ok(())
+                } else {
+                    self.player.next()
+                }
+            }
+            Control::Previous => {
+                if self.queue_active.is_some() {
+                    self.queue_step(-1);
+                    Ok(())
+                } else {
+                    self.player.previous()
+                }
+            }
             Control::Seek(offset) => {
                 seeked = true;
                 self.player.seek_relative(offset)
@@ -954,7 +1582,22 @@ impl App {
             return false;
         }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => return true,
+            KeyCode::Char('q') => return true,
+            KeyCode::Char('Q') if self.tab == Tab::Collections => {
+                if let Some(name) = self.collections.get(self.selected[2]).cloned() {
+                    match self.store.queue_collection(&name) {
+                        Ok(count) => {
+                            self.queue_active = None;
+                            if let Err(e) = self.reload() {
+                                self.message_error(e)
+                            }
+                            self.tab = Tab::Queue;
+                            self.status = format!("Queued {count} tracks from collection: {name}");
+                        }
+                        Err(e) => self.message_error(e),
+                    }
+                }
+            }
             KeyCode::Esc if self.tap_sync => {
                 self.tap_sync = false;
                 self.lyric_follow = true;
@@ -993,12 +1636,83 @@ impl App {
             KeyCode::Char('g') => self.prompt = Some(Prompt::JumpTime(String::new())),
             KeyCode::Char('z') => self.undo_seek(),
             KeyCode::Tab => self.tab = Tab::from_index(self.tab.index() + 1),
-            KeyCode::BackTab => self.tab = Tab::from_index(self.tab.index() + 4),
-            KeyCode::Char('1'..='5') => {
+            KeyCode::BackTab => self.tab = Tab::from_index(self.tab.index() + 5),
+            KeyCode::Char('1'..='6') => {
                 if let KeyCode::Char(c) = key.code {
                     self.tab = Tab::from_index((c as u8 - b'1') as usize)
                 }
             }
+            KeyCode::Char('+')
+                if matches!(
+                    self.tab,
+                    Tab::Library | Tab::ForYou | Tab::Queue | Tab::Playing
+                ) =>
+            {
+                self.rate_media(1)
+            }
+            KeyCode::Char('-')
+                if matches!(
+                    self.tab,
+                    Tab::Library | Tab::ForYou | Tab::Queue | Tab::Playing
+                ) =>
+            {
+                self.rate_media(-1)
+            }
+            KeyCode::Char('=')
+                if matches!(
+                    self.tab,
+                    Tab::Library | Tab::ForYou | Tab::Queue | Tab::Playing
+                ) =>
+            {
+                self.rate_media(0)
+            }
+            KeyCode::Char('e')
+                if matches!(
+                    self.tab,
+                    Tab::Library | Tab::Discover | Tab::ForYou | Tab::Queue
+                ) =>
+            {
+                self.enqueue_current()
+            }
+            KeyCode::Enter if self.tab == Tab::Queue => {
+                self.play_queue(self.queue_selected);
+            }
+            KeyCode::Char('p') if self.tab == Tab::Queue => {
+                self.play_queue(self.queue_selected);
+            }
+            KeyCode::Delete | KeyCode::Backspace if self.tab == Tab::Queue => {
+                if let Some((row, _)) = self.queue.get(self.queue_selected) {
+                    match self.store.queue_remove(*row) {
+                        Ok(()) => {
+                            if let Err(e) = self.reload() {
+                                self.message_error(e)
+                            }
+                            self.status = "Queue entry removed".into();
+                        }
+                        Err(e) => self.message_error(e),
+                    }
+                }
+            }
+            KeyCode::Char('<') if self.tab == Tab::Queue => self.reorder_queue(-1),
+            KeyCode::Char('>') if self.tab == Tab::Queue => self.reorder_queue(1),
+            KeyCode::Char('S') if self.tab == Tab::Queue => self.shuffle_queue(),
+            KeyCode::Char('R') if self.tab == Tab::Queue => {
+                self.queue_repeat = !self.queue_repeat;
+                self.status = format!(
+                    "Queue repeat: {}",
+                    if self.queue_repeat { "ON" } else { "OFF" }
+                );
+            }
+            KeyCode::Char('C') if self.tab == Tab::Queue => match self.store.queue_clear() {
+                Ok(()) => {
+                    self.queue_active = None;
+                    if let Err(e) = self.reload() {
+                        self.message_error(e)
+                    }
+                    self.status = "Queue cleared. Current playback continues.".into();
+                }
+                Err(e) => self.message_error(e),
+            },
             KeyCode::Down | KeyCode::Char('j') if self.tab == Tab::Playing => {
                 self.move_lyric_cursor(1)
             }
@@ -1027,6 +1741,40 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.choose(1),
             KeyCode::Up | KeyCode::Char('k') => self.choose(-1),
+            KeyCode::Char('Y') if self.tab == Tab::Discover => {
+                self.prompt = Some(Prompt::MusicQuery(String::new()))
+            }
+            KeyCode::Enter if self.tab == Tab::Discover && self.music_items.is_some() => {
+                self.open_music_selection()
+            }
+            KeyCode::Char('P') if self.tab == Tab::Discover || self.tab == Tab::Collections => {
+                self.prompt = Some(Prompt::PlaylistUrl(String::new()))
+            }
+            KeyCode::Char('a') if self.tab == Tab::Discover && self.playlist_preview.is_some() => {
+                let idx = self.selected[1];
+                if !self.playlist_selected.insert(idx) {
+                    self.playlist_selected.remove(&idx);
+                }
+                self.status = format!(
+                    "{} of {} playlist tracks selected",
+                    self.playlist_selected.len(),
+                    self.playlist_preview.as_ref().unwrap().entries.len()
+                );
+            }
+            KeyCode::Char('A') if self.tab == Tab::Discover && self.playlist_preview.is_some() => {
+                let len = self.playlist_preview.as_ref().unwrap().entries.len();
+                self.playlist_selected = (0..len).collect();
+                self.status = format!("All {len} playlist tracks selected");
+            }
+            KeyCode::Char('I') if self.tab == Tab::Discover && self.playlist_preview.is_some() => {
+                self.import_playlist_selection();
+            }
+            KeyCode::Char('B') if self.tab == Tab::Discover && self.playlist_preview.is_some() => {
+                self.batch_download(Kind::Audio)
+            }
+            KeyCode::Char('V') if self.tab == Tab::Discover && self.playlist_preview.is_some() => {
+                self.batch_download(Kind::Video)
+            }
             KeyCode::Char('/') => self.prompt = Some(Prompt::Search(self.search.clone())),
             KeyCode::Char('f') if self.tab == Tab::ForYou => {
                 self.prompt = Some(Prompt::Filter(self.filter_tags.join(",")))
@@ -1076,15 +1824,14 @@ impl App {
             KeyCode::Char('x') => {
                 self.tap_sync = false;
                 self.seek_undo = None;
+                self.finish_listening();
                 self.player.stop();
+                self.queue_active = None;
                 self.elapsed_ms = None;
                 self.status = "Playback stopped".into();
             }
-            KeyCode::Char('n') => {
-                if let Err(e) = self.player.next() {
-                    self.message_error(e)
-                }
-            }
+            KeyCode::Char('n') => self.queue_step(1),
+            KeyCode::Char('b') => self.queue_step(-1),
             KeyCode::Char('r') => {
                 if let Err(e) = self.reload() {
                     self.message_error(e)
@@ -1095,6 +1842,95 @@ impl App {
         false
     }
     fn tick(&mut self) {
+        let active = self.player.engine.is_some()
+            || self
+                .mpd
+                .as_ref()
+                .is_some_and(|status| status.state == "play");
+        if active
+            && self.spectrum.is_none()
+            && !self.spectrum_attempted
+            && std::env::var_os("WINDMILL_DISABLE_VISUALIZER").is_none()
+        {
+            self.spectrum_attempted = true;
+            self.spectrum = visualizer::Spectrum::start().ok();
+        }
+        if !active {
+            self.spectrum = None;
+            self.spectrum_bands = [0.; 16];
+            self.spectrum_attempted = false;
+        }
+        if let Some(spectrum) = self.spectrum.as_ref()
+            && let Some(data) = spectrum.newest()
+        {
+            self.spectrum_bands = data;
+        }
+        while let Ok(response) = self.music_rx.try_recv() {
+            if response.query != self.music_query {
+                continue;
+            }
+            self.music_pending = false;
+            match response.result {
+                Ok(items) => {
+                    self.selected[1] = 0;
+                    self.status = format!(
+                        "YouTube Music: {} results · Enter open · p play songs",
+                        items.len()
+                    );
+                    self.music_items = Some(items);
+                }
+                Err(e) => self.message_error(e),
+            }
+        }
+        while let Ok(response) = self.browse_rx.try_recv() {
+            if response.key != self.browse_key {
+                continue;
+            }
+            match response.result {
+                Ok((name, entries)) => {
+                    let len = entries.len();
+                    self.playlist_selected = (0..len).collect();
+                    self.music_items = None;
+                    self.selected[1] = 0;
+                    self.playlist_preview = Some(Playlist {
+                        title: name,
+                        url: format!("ytmusic:{}", response.key),
+                        entries,
+                    });
+                    self.status =
+                        format!("Public album/artist tracks loaded: {len} · I import · B download");
+                }
+                Err(e) => self.message_error(e),
+            }
+        }
+        while let Ok(response) = self.art_rx.try_recv() {
+            if self.art_key.as_deref() != Some(&response.key) {
+                continue;
+            }
+            self.art_pending = false;
+            if let Ok(Some(lines)) = response.result {
+                self.art_lines = lines;
+            }
+        }
+        while let Ok(response) = self.playlist_rx.try_recv() {
+            if response.url != self.playlist_url {
+                continue;
+            }
+            self.playlist_loading = false;
+            match response.result {
+                Ok(preview) => {
+                    let len = preview.entries.len();
+                    self.playlist_selected = (0..len).collect();
+                    self.selected[1] = 0;
+                    self.status = format!(
+                        "Preview: {} · {len} items selected · a toggle · I import · B audio / V video download",
+                        preview.title
+                    );
+                    self.playlist_preview = Some(preview);
+                }
+                Err(e) => self.message_error(e),
+            }
+        }
         while let Ok(response) = self.lyric_rx.try_recv() {
             if self.lyric_key.as_deref() != Some(&response.key) {
                 continue;
@@ -1120,6 +1956,10 @@ impl App {
             }
         }
         while let Ok(response) = self.download_rx.try_recv() {
+            let batch = response.batch;
+            if response.result.is_err() && batch.is_some() {
+                self.batch_failed += 1
+            }
             match response.result {
                 Ok(file) => {
                     match self
@@ -1137,6 +1977,25 @@ impl App {
                     }
                 }
                 Err(e) => self.message_error(e),
+            }
+            if let Some((done, total)) = batch {
+                if done == total {
+                    self.batch_running = false;
+                }
+                self.status = format!(
+                    "Batch {}: {done}/{total} processed · {} errors{}",
+                    if self.batch_running {
+                        "progress"
+                    } else {
+                        "complete"
+                    },
+                    self.batch_failed,
+                    if self.batch_running {
+                        ""
+                    } else {
+                        " · see Library for offline assets"
+                    }
+                );
             }
         }
         while let Ok(response) = self.rx.try_recv() {
@@ -1157,8 +2016,24 @@ impl App {
             }
         }
         if self.last_tick.elapsed() >= Duration::from_millis(350) {
+            let before_engine = self.player.engine;
             self.elapsed_ms = self.player.elapsed_ms();
             self.mpd = player::mpd_status().ok();
+            self.update_listening();
+            if before_engine == Some(Engine::Mpv)
+                && self.player.engine.is_none()
+                && self.queue_active.is_none()
+            {
+                self.finish_listening();
+            }
+            let queue_finished = self.queue_active.is_some()
+                && ((before_engine == Some(Engine::Mpv) && self.player.engine.is_none())
+                    || (before_engine == Some(Engine::Mpd)
+                        && self.mpd.as_ref().is_some_and(|mpd| mpd.state == "stop")));
+            if queue_finished {
+                self.queue_step(1);
+                self.mpd = player::mpd_status().ok();
+            }
             self.duration_ms = if self.player.engine == Some(Engine::Mpv) {
                 self.player.duration_ms()
             } else {
@@ -1166,6 +2041,7 @@ impl App {
             };
             // Track MPD queue changes and reload lyrics for the current actual file.
             self.load_lyrics(false);
+            self.load_art();
             self.last_tick = Instant::now();
         }
     }
@@ -1228,6 +2104,7 @@ pub fn run(store: Store) -> Result<()> {
             }
         }
     }
+    app.finish_listening();
     Ok(())
 }
 fn panel(title: &str) -> Block<'_> {
@@ -1262,6 +2139,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Tab::Collections => draw_collections(frame, app, content[0], content[1]),
         Tab::ForYou => draw_recommendations(frame, app, content[0], content[1]),
         Tab::Playing => draw_playing(frame, app, content[0], content[1]),
+        Tab::Queue => draw_queue(frame, app, content[0], content[1]),
     }
     let status = if let Some(ref prompt) = app.prompt {
         format!("{}: {}_", prompt.label(), prompt.text())
@@ -1278,7 +2156,7 @@ fn draw(frame: &mut Frame, app: &App) {
     let bottom_hint = if app.tap_sync {
         "TAP SYNC: p play/pause · SPACE mark lyric · Esc cancel · ←/→ seek · q quit"
     } else {
-        "←/→ ±5s · Shift+←/→ ±30s · g jump · z undo · click progress · 1-5 tabs · Space/p pause · q quit"
+        "←/→ ±5s · Shift+←/→ ±30s · g jump · z undo · click progress · 1-6 tabs · Space/p pause · q quit"
     };
     frame.render_widget(
         Paragraph::new(bottom_hint)
@@ -1344,10 +2222,92 @@ fn draw_library(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     );
 }
 fn draw_discover(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
+    if let Some(items) = app.music_items.as_ref() {
+        let entries = items
+            .iter()
+            .map(|item| ListItem::new(format!("{} | {} — {}", item.kind, item.title, item.creator)))
+            .collect();
+        select_list(
+            frame,
+            entries,
+            app.selected[1],
+            &format!(" YouTube Music · {} results ", items.len()),
+            left,
+        );
+        let desc = items
+            .get(app.selected[1])
+            .map(|m| {
+                format!(
+                    "{}\\nCreator: {}\\nType: {}\\nURL: {}",
+                    m.title, m.creator, m.kind, m.url
+                )
+            })
+            .unwrap_or_default();
+        let text = format!(
+            "{}\\n\\nEnter open album/artist/playlist or play song\\n            p play individual song · s save song\\n            Y search again (songs:,albums:,artists:,playlists:)\\n            P public playlist URL · / regular video search",
+            desc
+        );
+        frame.render_widget(
+            Paragraph::new(text.replace("\\n", "\n"))
+                .block(panel(" YouTube Music "))
+                .wrap(Wrap { trim: true }),
+            right,
+        );
+        return;
+    }
+    if let Some(playlist) = app.playlist_preview.as_ref() {
+        let items = playlist
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, video)| {
+                ListItem::new(format!(
+                    "{} {} — {}",
+                    if app.playlist_selected.contains(&index) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    },
+                    video.title,
+                    video.creator
+                ))
+            })
+            .collect();
+        select_list(
+            frame,
+            items,
+            app.selected[1],
+            &format!(
+                " {} · {} selected / {} ",
+                playlist.title,
+                app.playlist_selected.len(),
+                playlist.entries.len()
+            ),
+            left,
+        );
+        let current = app
+            .selected_video()
+            .map(|v| format!("{}\\nBy: {}\\nSource: {}", v.title, v.creator, v.url))
+            .unwrap_or_default();
+        let text = format!(
+            "{}\\n\\nURL: {}\\nSelected: {} / {}\\n\\n            j/k navigate · a toggle · A select all\\n            I import selected into collection\\n            B download selected audio · V video\\n            P open another playlist · / normal search\\n            p play current · s save current\\n\\n            Nothing downloads until you press B or V.",
+            current,
+            playlist.url,
+            app.playlist_selected.len(),
+            playlist.entries.len()
+        );
+        frame.render_widget(
+            Paragraph::new(text.replace("\\n", "\n"))
+                .block(panel(" Playlist preview "))
+                .wrap(Wrap { trim: true }),
+            right,
+        );
+        return;
+    }
     let items = app
         .found
         .iter()
-        .map(|v| ListItem::new(format!("{}  —  {}", v.title, v.creator)))
+        .map(|v| ListItem::new(format!("{} — {}", v.title, v.creator)))
         .collect();
     select_list(
         frame,
@@ -1365,7 +2325,7 @@ fn draw_discover(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     );
     let description = if let Some(v) = app.selected_video() {
         format!(
-            "{}\\n\\nBy: {}\\nVideo ID: {}\\n\\n{}\\n\\nStatus: {}\\n\\nPress p to play via mpv.\\nPress s to save to local catalog.\\nPress d to download audio or v for video.",
+            "{}\\n\\nBy: {}\\nVideo ID: {}\\n\\n{}\\n\\nStatus: {}\\n\\nPress p to play. s to save. d audio/v video.\\nPress P to preview a public playlist.",
             v.title,
             v.creator,
             v.id,
@@ -1376,10 +2336,12 @@ fn draw_discover(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
                 "Not saved"
             }
         )
+    } else if app.playlist_loading {
+        "Fetching playlist metadata, no downloads started...".into()
     } else if app.pending {
-        "Searching public YouTube metadata...".into()
+        "Searching YouTube...".into()
     } else {
-        "Press / and enter a search query.\\nResults come from yt-dlp with no Google sign-in.\\nYour Windmill catalog stays local.".into()
+        "Press / to search videos or P to paste a public playlist URL.\\n        Preview and select before importing or downloading.".into()
     };
     frame.render_widget(
         Paragraph::new(description.replace("\\n", "\n"))
@@ -1432,7 +2394,7 @@ fn draw_recommendations(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         frame,
         items,
         app.selected[3],
-        " For You · tag ranked ",
+        " For You · local taste ranked ",
         left,
     );
     let filter = if app.filter_tags.is_empty() {
@@ -1442,12 +2404,16 @@ fn draw_recommendations(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     };
     let text = if let Some((score, media)) = app.recommendations.get(app.selected[3]) {
         format!(
-            "{}\\n\\nBy: {}\\nTag score: {}\\n\\nRanked using: {}\\n\\nPress p to play. Press f to change tags.\\nFor You is based entirely on your local tags.",
-            media.title, media.creator, score, filter
+            "{}\\n\\nBy: {}\\nScore: {}\\n\\nTags: {}\\n\\n{}\\n\\n+ like · - dislike · = neutral\\np play · f edit tags\\nAll preference data stays local.",
+            media.title,
+            media.creator,
+            score,
+            filter,
+            app.store.preference_reason(media.id).unwrap_or_default()
         )
     } else {
         format!(
-            "No matches yet.\\n\\nTag items in Library using t, then come back here.\\n\\nPress f to choose your own tags.\\nCurrent tags: {filter}"
+            "No recommendations yet.\\n\\nTag songs using t, like them with +, or listen for a while.\\nPress f to choose tags.\\nCurrent tags: {filter}"
         )
     };
     frame.render_widget(
@@ -1480,6 +2446,49 @@ fn progress_area(area: Rect) -> Rect {
         ])
         .split(halves[0]);
     panels[1]
+}
+fn draw_queue(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
+    let items = app
+        .queue
+        .iter()
+        .enumerate()
+        .map(|(index, (row, media))| {
+            ListItem::new(format!(
+                "{} {:>3}. {} — {}",
+                if app.queue_active == Some(*row) {
+                    "♫"
+                } else {
+                    " "
+                },
+                index + 1,
+                media.title,
+                media.creator
+            ))
+        })
+        .collect();
+    select_list(
+        frame,
+        items,
+        app.queue_selected,
+        &format!(" Queue · {} tracks ", app.queue.len()),
+        left,
+    );
+    let current = app
+        .queue
+        .get(app.queue_selected)
+        .map(|(_, m)| format!("{}\\nBy {}\\n\\n{}", m.title, m.creator, m.source))
+        .unwrap_or_else(|| "Queue empty. Press e from Library, Discover, or For You.".into());
+    let text = format!(
+        "{}\\n\\n        Enter/p play selected · e duplicate item\\n        n/b next/previous · Delete remove\\n        </> reorder · S shuffle · R repeat {}\\n        C clear queue · Q from Collections loads whole collection\\n\\n        Queue persists across Windmill restarts.",
+        current,
+        if app.queue_repeat { "ON" } else { "OFF" }
+    );
+    frame.render_widget(
+        Paragraph::new(text.replace("\\n", "\n"))
+            .block(panel(" Queue controls "))
+            .wrap(Wrap { trim: true }),
+        right,
+    );
 }
 fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     let snap = app.mpris_snapshot();
@@ -1521,17 +2530,72 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         )),
         Line::from(Span::styled(snap.artist, Style::default().fg(MUTED))),
         Line::raw(""),
-        Line::from(format!("♫  {engine}  ·  {}", snap.state)),
+        Line::from(format!("♫ {engine} · {}", snap.state)),
         Line::raw(""),
-        Line::from(format!("  {minute:02}:{second:02} / {duration_label}")),
+        Line::from(format!("{minute:02}:{second:02} / {duration_label}")),
     ];
-    frame.render_widget(
-        Paragraph::new(details)
-            .block(panel(" Now Playing "))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        info[0],
-    );
+    let has_spectrum = app.spectrum.is_some();
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(7),
+            Constraint::Length(if has_spectrum { 6 } else { 0 }),
+        ])
+        .split(info[0]);
+    if !app.art_lines.is_empty() {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+            .split(sections[0]);
+        frame.render_widget(
+            Paragraph::new(app.art_lines.clone())
+                .block(panel(" Cover "))
+                .alignment(Alignment::Center),
+            columns[0],
+        );
+        frame.render_widget(
+            Paragraph::new(details)
+                .block(panel(" Now Playing "))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            columns[1],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(details)
+                .block(panel(" Now Playing "))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            sections[0],
+        );
+    }
+    if has_spectrum {
+        let mut bars = Vec::new();
+        for row in (0..4).rev() {
+            let mut spans = Vec::new();
+            for (idx, value) in app.spectrum_bands.iter().enumerate() {
+                let brightness = (value * 4.).round() as usize;
+                let color = if idx < 6 {
+                    ACCENT
+                } else if idx < 11 {
+                    HIGHLIGHT
+                } else {
+                    Color::Rgb(144, 178, 205)
+                };
+                spans.push(Span::styled(
+                    if brightness > row { "█ " } else { "  " },
+                    Style::default().fg(color),
+                ));
+            }
+            bars.push(Line::from(spans));
+        }
+        frame.render_widget(
+            Paragraph::new(bars)
+                .block(panel(" Output spectrum · live "))
+                .alignment(Alignment::Center),
+            sections[1],
+        );
+    }
     let ratio = if duration > 0 {
         (elapsed as f64 / duration as f64).clamp(0.0, 1.0)
     } else {
@@ -1720,6 +2784,7 @@ mod tests {
             Tab::Collections,
             Tab::ForYou,
             Tab::Playing,
+            Tab::Queue,
         ] {
             app.tab = tab;
             terminal.draw(|frame| draw(frame, &app)).unwrap();

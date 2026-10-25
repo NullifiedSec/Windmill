@@ -57,7 +57,7 @@ def main():
         env = dict(
             os.environ,
             WINDMILL_DATA_DIR=str(root / "profile"),
-            WINDMILL_MPD_ADDR="127.0.0.1:0",
+            WINDMILL_DISABLE_VISUALIZER="1", WINDMILL_MPD_ADDR="127.0.0.1:0",
             PATH=f"{bin_dir}:{os.environ.get('PATH','/usr/bin')}",
             TERM="xterm-256color",
         )

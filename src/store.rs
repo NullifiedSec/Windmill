@@ -39,6 +39,27 @@ impl Store {
               collection_name TEXT NOT NULL REFERENCES collections(name) ON DELETE CASCADE,
               media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
               PRIMARY KEY(collection_name,media_id)
+            );
+            CREATE TABLE IF NOT EXISTS media_preferences (
+              media_id INTEGER PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
+              rating INTEGER NOT NULL CHECK(rating IN(-1,0,1))
+            );
+            CREATE TABLE IF NOT EXISTS listen_stats (
+              media_id INTEGER PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
+              listens INTEGER NOT NULL DEFAULT 0,
+              skips INTEGER NOT NULL DEFAULT 0,
+              total_seconds INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS play_queue (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              sort_index INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS playlist_order (
+              collection_name TEXT NOT NULL REFERENCES collections(name) ON DELETE CASCADE,
+              media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              ordinal INTEGER NOT NULL,
+              PRIMARY KEY(collection_name,media_id)
             );",
         )?;
         Ok(Self { conn })
@@ -196,10 +217,121 @@ impl Store {
         )?;
         Ok(())
     }
+    /// Atomic and idempotent playlist import. Existing media metadata/tags are
+    /// preserved, and duplicate videos share one catalog identity.
+    /// Queue entries have stable row IDs and may contain duplicate songs.
+    pub fn queue_entries(&self) -> Result<Vec<(i64, Media)>> {
+        let mut q = self.conn.prepare(
+            "SELECT q.id,m.id,m.source,m.title,m.creator
+            FROM play_queue q JOIN media m ON m.id=q.media_id
+            ORDER BY q.sort_index,q.id",
+        )?;
+        q.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                Media {
+                    id: r.get(1)?,
+                    source: r.get(2)?,
+                    title: r.get(3)?,
+                    creator: r.get(4)?,
+                },
+            ))
+        })?
+        .collect()
+    }
+    pub fn queue_add(&self, media_id: i64) -> Result<i64> {
+        let next: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(sort_index),-1)+1 FROM play_queue",
+            [],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO play_queue(media_id,sort_index) VALUES(?1,?2)",
+            params![media_id, next],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+    pub fn queue_remove(&self, entry_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM play_queue WHERE id=?1", [entry_id])?;
+        Ok(())
+    }
+    pub fn queue_clear(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM play_queue", [])?;
+        Ok(())
+    }
+    pub fn queue_reorder(&self, ids: &[i64]) -> Result<()> {
+        let old = self.queue_entries()?;
+        if old.len() != ids.len()
+            || old.iter().any(|(id, _)| !ids.contains(id))
+            || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for (index, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE play_queue SET sort_index=?1 WHERE id=?2",
+                params![index as i64, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn queue_collection(&self, name: &str) -> Result<usize> {
+        let items = self.collection_items(name)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM play_queue", [])?;
+        for (i, m) in items.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO play_queue(media_id,sort_index) VALUES(?1,?2)",
+                params![m.id, i as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(items.len())
+    }
+    pub fn import_playlist(&self, name: &str, videos: &[crate::youtube::Video]) -> Result<usize> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 120 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO collections(name) VALUES (?1)",
+            [name],
+        )?;
+        let mut added = 0usize;
+        for (ordinal, video) in videos.iter().enumerate() {
+            let n = tx.execute(
+                "INSERT OR IGNORE INTO media(source,title,creator) VALUES(?1,?2,?3)",
+                params![video.url, video.title, video.creator],
+            )?;
+            added += n;
+            let id: i64 =
+                tx.query_row("SELECT id FROM media WHERE source=?1", [&video.url], |r| {
+                    r.get(0)
+                })?;
+            tx.execute(
+                "INSERT OR IGNORE INTO membership(collection_name,media_id) VALUES(?1,?2)",
+                params![name, id],
+            )?;
+            tx.execute(
+                "INSERT INTO playlist_order(collection_name,media_id,ordinal)
+                VALUES(?1,?2,?3) ON CONFLICT(collection_name,media_id)
+                DO UPDATE SET ordinal=excluded.ordinal",
+                params![name, id, ordinal as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
     pub fn collection_items(&self, name: &str) -> Result<Vec<Media>> {
         let mut q = self.conn.prepare(
             "SELECT m.id,m.source,m.title,m.creator FROM media m
-          JOIN membership c ON c.media_id=m.id WHERE c.collection_name=?1 ORDER BY m.id",
+          JOIN membership c ON c.media_id=m.id
+          LEFT JOIN playlist_order p ON p.media_id=m.id AND p.collection_name=c.collection_name
+          WHERE c.collection_name=?1 ORDER BY p.ordinal IS NULL,p.ordinal,m.id",
         )?;
         q.query_map([name], |r| {
             Ok(Media {
@@ -210,6 +342,66 @@ impl Store {
             })
         })?
         .collect()
+    }
+    pub fn rate(&self, id: i64, rating: i64) -> Result<()> {
+        if !(-1..=1).contains(&rating) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.conn.execute(
+            "INSERT INTO media_preferences(media_id,rating)
+            VALUES(?1,?2) ON CONFLICT(media_id)
+            DO UPDATE SET rating=excluded.rating",
+            params![id, rating],
+        )?;
+        Ok(())
+    }
+    pub fn rating(&self, id: i64) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT rating FROM media_preferences WHERE media_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+    pub fn record_listen(&self, id: i64, seconds: i64) -> Result<()> {
+        let seconds = seconds.clamp(0, 86400);
+        self.conn.execute(
+            "INSERT INTO listen_stats(media_id,listens,skips,total_seconds)
+            VALUES(?1,?2,?3,?4) ON CONFLICT(media_id) DO UPDATE SET
+              listens=listens+excluded.listens,
+              skips=skips+excluded.skips,
+              total_seconds=total_seconds+excluded.total_seconds",
+            params![
+                id,
+                if seconds >= 30 { 1 } else { 0 },
+                if seconds < 30 { 1 } else { 0 },
+                seconds
+            ],
+        )?;
+        Ok(())
+    }
+    pub fn preference_reason(&self, id: i64) -> Result<String> {
+        let rating = self.rating(id)?;
+        let (plays, skips, seconds): (i64, i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT listens,skips,total_seconds FROM listen_stats WHERE media_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .unwrap_or((0, 0, 0));
+        Ok(format!(
+            "{} · {plays} listens · {skips} quick skips · {seconds}s played",
+            match rating {
+                1 => "Liked",
+                -1 => "Disliked",
+                _ => "Not rated",
+            }
+        ))
     }
     pub fn recommend<'a>(&self, tags: impl Iterator<Item = &'a str>) -> Result<Vec<(i64, Media)>> {
         let requested: Vec<String> = tags
@@ -224,10 +416,23 @@ impl Store {
             let existing: Vec<String> = q
                 .query_map([media.id], |r| r.get::<_, String>(0))?
                 .collect::<Result<_>>()?;
-            let score = requested
+            let matched = requested
                 .iter()
                 .filter(|t| existing.iter().any(|e| e.to_lowercase() == **t))
                 .count() as i64;
+            let (listens, skips): (i64, i64) = self
+                .conn
+                .query_row(
+                    "SELECT listens,skips FROM listen_stats WHERE media_id=?1",
+                    [media.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .unwrap_or((0, 0));
+            let rating = self.rating(media.id)?;
+            // Weighted but explainable: tags form the basis, explicit dislike
+            // strongly suppresses a track; listening history refines ordering.
+            let score = matched * 5 + rating * 12 + listens.min(8) * 2 - skips.min(10) * 2;
             if score > 0 {
                 out.push((score, media));
             }
@@ -239,6 +444,102 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn feedback_and_listening_statistics_influence_recommendations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("lib.db");
+        {
+            let store = Store::open(&db).unwrap();
+            let a = store.add("a", "A", "Singer").unwrap();
+            let b = store.add("b", "B", "Singer").unwrap();
+            store.tag(a, "dreamy").unwrap();
+            store.tag(b, "dreamy").unwrap();
+            assert_eq!(store.recommend(["dreamy"].into_iter()).unwrap().len(), 2);
+            store.rate(a, 1).unwrap();
+            store.rate(b, -1).unwrap();
+            store.record_listen(a, 80).unwrap();
+            store.record_listen(b, 8).unwrap();
+            let ranked = store.recommend(["dreamy"].into_iter()).unwrap();
+            assert_eq!(ranked.len(), 1);
+            assert_eq!(ranked[0].1.source, "a");
+        }
+        let store = Store::open(&db).unwrap();
+        assert!(store.preference_reason(1).unwrap().contains("Liked"));
+        assert!(store.recommend(["dreamy"].into_iter()).unwrap()[0].0 > 5);
+    }
+    #[test]
+    fn queue_persists_duplicates_reorder_and_collection_loading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db");
+        let a;
+        let b;
+        {
+            let store = Store::open(&db).unwrap();
+            a = store.add("a", "A", "Artist").unwrap();
+            b = store.add("b", "B", "Artist").unwrap();
+            store.create_collection("Mix").unwrap();
+            store.add_to_collection("Mix", b).unwrap();
+            store.add_to_collection("Mix", a).unwrap();
+            let first = store.queue_add(a).unwrap();
+            let second = store.queue_add(a).unwrap();
+            let third = store.queue_add(b).unwrap();
+            assert_eq!(store.queue_entries().unwrap().len(), 3);
+            store.queue_reorder(&[third, first, second]).unwrap();
+            assert!(store.queue_reorder(&[first, second, second]).is_err());
+        }
+        let store = Store::open(&db).unwrap();
+        assert_eq!(
+            store
+                .queue_entries()
+                .unwrap()
+                .iter()
+                .map(|(_, m)| m.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "a", "a"]
+        );
+        assert_eq!(store.queue_collection("Mix").unwrap(), 2);
+        assert_eq!(store.queue_entries().unwrap().len(), 2);
+        store.queue_clear().unwrap();
+        assert!(store.queue_entries().unwrap().is_empty());
+    }
+    #[test]
+    fn playlist_import_is_atomic_idempotent_and_ordered() {
+        let s = Store::open(Path::new(":memory:")).unwrap();
+        let a = crate::youtube::Video {
+            id: "HyHNuVaZJ-k".into(),
+            title: "A".into(),
+            creator: "X".into(),
+            url: "https://www.youtube.com/watch?v=HyHNuVaZJ-k".into(),
+        };
+        let b = crate::youtube::Video {
+            id: "abcdefABC_1".into(),
+            title: "B".into(),
+            creator: "Y".into(),
+            url: "https://www.youtube.com/watch?v=abcdefABC_1".into(),
+        };
+        assert_eq!(
+            s.import_playlist("My Mix", &[b.clone(), a.clone()])
+                .unwrap(),
+            2
+        );
+        s.tag(s.all().unwrap()[0].id, "saved").unwrap();
+        assert_eq!(
+            s.import_playlist("My Mix", &[b.clone(), a.clone()])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.collection_items("My Mix")
+                .unwrap()
+                .iter()
+                .map(|m| m.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "A"]
+        );
+        assert_eq!(s.all().unwrap().len(), 2);
+        assert_eq!(s.tags_for(s.all().unwrap()[0].id).unwrap(), vec!["saved"]);
+        assert!(s.import_playlist("", &[a]).is_err());
+    }
     #[test]
     fn flexible_tags_and_collections_survive_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -261,7 +562,7 @@ mod tests {
         }
         let s = Store::open(&path).unwrap();
         assert_eq!(s.collection_items("The Windmill").unwrap().len(), 1);
-        assert_eq!(s.recommend(["windmill"].into_iter()).unwrap()[0].0, 1);
+        assert_eq!(s.recommend(["windmill"].into_iter()).unwrap()[0].0, 5);
         s.untag(id, "windmill").unwrap();
         assert!(s.recommend(["windmill"].into_iter()).unwrap().is_empty());
     }
@@ -358,7 +659,7 @@ mod tests {
         let r = s.recommend(["calm", "instrumental"].into_iter()).unwrap();
         assert_eq!(
             r.iter().map(|(n, m)| (*n, m.id)).collect::<Vec<_>>(),
-            vec![(2, b), (1, a)]
+            vec![(10, b), (5, a)]
         );
     }
 }

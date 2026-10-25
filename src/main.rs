@@ -1,13 +1,17 @@
+mod art;
 mod download;
 mod lyric_offset;
 mod lyric_source;
 mod lyrics;
 mod mpris;
 mod player;
+mod playlist;
 mod seek;
 mod store;
 mod ui;
+mod visualizer;
 mod youtube;
+mod ytmusic;
 use std::{env, error::Error, fs, path::PathBuf, process::Command};
 use store::Store;
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -23,7 +27,7 @@ fn data_dir() -> Result<PathBuf> {
 }
 fn usage() {
     println!(
-        "Windmill 0.3.4 — local-first media center\n\
+        "Windmill 0.5.0 — local-first media center\n\
     ui | tui                  # launch terminal media center (default)\n\
     add <path-or-url> <title> <creator>\n\
     list | tag <id> <tag> | untag <id> <tag>\n\
@@ -31,7 +35,12 @@ fn usage() {
     recommend <tag1,tag2,...> | play <id> | download <id> <audio|video>\n\
     lyrics <file.lrc> <elapsed-ms>
 \
-    mpd status | mpd play <mpd-library-uri> | help"
+    playlist preview <youtube-playlist-url> | playlist import <url> [collection-name]\n\
+    playlist download <url> <audio|video> | rate <id> <like|dislike|neutral>\n\
+    queue list | queue add <media-id>\n\
+    queue clear | queue collection <collection-name>\n\
+    music search <songs|albums|artists|playlists> <query>\n\
+    music browse <albums|artists> <browse-id> | mpd status | help"
     );
 }
 fn command(program: &str, args: &[&str]) -> Result<()> {
@@ -59,6 +68,122 @@ fn run() -> Result<()> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["music", "search", kind, query] => {
+            for result in ytmusic::search(kind, query).map_err(|e| e.to_string())? {
+                println!(
+                    "{} | {} — {} | {}",
+                    result.kind, result.title, result.creator, result.url
+                );
+            }
+        }
+        ["music", "browse", kind, id] => {
+            let (name, tracks) = ytmusic::browse(kind, id).map_err(|e| e.to_string())?;
+            println!("{} ({} tracks)", name, tracks.len());
+            for track in tracks {
+                println!("{} — {} | {}", track.title, track.creator, track.url);
+            }
+        }
+        ["rate", id, value] => {
+            let id = id.parse::<i64>()?;
+            let preference = match *value {
+                "like" => 1,
+                "dislike" => -1,
+                "neutral" => 0,
+                _ => return Err("Rate with like/dislike/neutral".into()),
+            };
+            store.get(id)?;
+            store.rate(id, preference)?;
+            println!("Preference saved for #{id}: {value}");
+        }
+        ["queue", "list"] => {
+            for (pos, (row, media)) in store.queue_entries()?.iter().enumerate() {
+                println!(
+                    "{:>3}. [{row}] #{} | {} — {}",
+                    pos + 1,
+                    media.id,
+                    media.title,
+                    media.creator
+                );
+            }
+        }
+        ["queue", "add", id] => {
+            let id = id.parse::<i64>()?;
+            store.get(id)?;
+            let entry = store.queue_add(id)?;
+            println!("Queued media #{id} as entry {entry}");
+        }
+        ["queue", "clear"] => {
+            store.queue_clear()?;
+            println!("Queue cleared");
+        }
+        ["queue", "collection", name] => {
+            let count = store.queue_collection(name)?;
+            println!("Queued {count} tracks from {name}");
+        }
+        ["playlist", "preview", url] => {
+            let pl = playlist::fetch(url).map_err(|e| e.to_string())?;
+            println!("{} | {} tracks | {}", pl.title, pl.entries.len(), pl.url);
+            for (i, entry) in pl.entries.iter().enumerate() {
+                println!(
+                    "{:>3}. {} — {} | {}",
+                    i + 1,
+                    entry.title,
+                    entry.creator,
+                    entry.url
+                );
+            }
+        }
+        ["playlist", "import", url] | ["playlist", "import", url, _] => {
+            let pl = playlist::fetch(url).map_err(|e| e.to_string())?;
+            let name = args.get(3).map_or(pl.title.as_str(), String::as_str);
+            let added = store.import_playlist(name, &pl.entries)?;
+            println!(
+                "Imported {} tracks into {name} ({added} new media)",
+                pl.entries.len()
+            );
+        }
+        ["playlist", "download", url, kind @ ("audio" | "video")] => {
+            let pl = playlist::fetch(url).map_err(|e| e.to_string())?;
+            store.import_playlist(&pl.title, &pl.entries)?;
+            let kind = if *kind == "audio" {
+                download::Kind::Audio
+            } else {
+                download::Kind::Video
+            };
+            let mut failed = 0;
+            let all = store.all()?;
+            for (i, entry) in pl.entries.iter().enumerate() {
+                let Some(media) = all.iter().find(|m| m.source == entry.url) else {
+                    failed += 1;
+                    continue;
+                };
+                if store
+                    .asset(media.id, kind.as_str())?
+                    .is_some_and(|path| std::path::Path::new(&path).is_file())
+                {
+                    println!(
+                        "{}/{}: already downloaded: {}",
+                        i + 1,
+                        pl.entries.len(),
+                        entry.title
+                    );
+                    continue;
+                }
+                match download::fetch(media.id, &entry.url, kind, &dir) {
+                    Ok(file) => {
+                        store.save_asset(media.id, kind.as_str(), &file)?;
+                        println!("{}/{}: saved {}", i + 1, pl.entries.len(), file.display());
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("{}/{}: {}: {e}", i + 1, pl.entries.len(), entry.title);
+                    }
+                }
+            }
+            if failed > 0 {
+                return Err(format!("{failed} download(s) failed").into());
+            }
+        }
         ["add", path, title, creator] => {
             let id = store.add(path, title, creator)?;
             println!("Added #{id}: {title}");

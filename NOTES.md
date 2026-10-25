@@ -11,3 +11,5 @@
 2026-10-25 - feature/lyrics-tap-sync - Added guided listen-and-tap lyric alignment, live MPD/mpv clock capture, persisted offset, undo and cancel - verified with silent PTY and unit tests
 2026-10-25 - feature/easy-playback-seeking - Added 5/30/60s navigation, typed jump-to-time, clickable progress bar, undo, and mpv error propagation - verified by isolated MPD/mpv integration tests
 2026-10-25 - fix/tap-sync-playback-control - Added p play/pause in Now Playing and Tap Sync without stealing Space cue input; clarified mode-specific help; verified against silent MPD/mpv MPRIS states
+2026-10-25 - feature/windmill-expansion - Playlist preview, selected atomic import, explicit batch downloads; covered by isolated fake-yt-dlp test.
+2026-10-25 - feature/windmill-expansion - unified queue, public YouTube Music discovery, truecolor art, live output spectrum and local recommendation feedback. Isolated tests verify each feature.

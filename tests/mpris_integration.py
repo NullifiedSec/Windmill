@@ -99,7 +99,7 @@ def main():
             else:
                 raise RuntimeError("MPD did not start.")
             env = dict(
-                os.environ, WINDMILL_DATA_DIR=str(root / "windmill"),
+                os.environ, WINDMILL_DISABLE_VISUALIZER="1", WINDMILL_DATA_DIR=str(root / "windmill"),
                 WINDMILL_MUSIC_ROOT=str(music),
                 WINDMILL_MPD_ADDR=f"127.0.0.1:{port}", TERM="xterm-256color",
                 PATH=f"{bin_dir}:{os.environ.get('PATH', '/usr/bin')}",

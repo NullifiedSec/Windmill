@@ -61,3 +61,10 @@ The isolated MPRIS integration test also enters Tap Sync during both
 silent MPD and mpv playback and presses p twice. It verifies paused
 then playing states through playerctl, ensuring the Space cue marker
 remains separate.
+
+
+## Public playlists
+
+`python3 tests/playlist_integration.py` tests playlist preview,
+atomic import, idempotency, playlist order, explicit batch downloading
+and skipping completed files using fake yt-dlp and a temporary catalog.

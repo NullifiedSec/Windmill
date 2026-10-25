@@ -1,13 +1,17 @@
-# Windmill architecture (v0.2)
+# Windmill architecture (v0.5)
 
 Windmill owns the **catalog and user experience**. MPD and mpv remain unmodified playback engines. No upstream source is vendored.
 
 ## Components
 
 - `src/store.rs`: SQLite media, tags, collections, assets and deterministic tag scoring. Collections do not map to physical directories.
-- `src/ui.rs`: Ratatui interface with Library, Discover, Collections, For You and Now Playing views. Online search and downloads use worker channels.
+- `src/ui.rs`: Ratatui interface with Library, Discover, Collections, For You, Now Playing and Queue views. Online search and downloads use worker channels.
 - `src/youtube.rs`: public yt-dlp search, strict video ID validation and canonical YouTube URLs.
 - `src/download.rs`: user-initiated audio/video downloads via subprocess argument arrays, output-path verification and managed downloads.
+- `src/playlist.rs`: validated playlist URLs, bounded flat-metadata preview, canonical per-video source identifiers.
+- `src/ytmusic.rs` / `scripts/ytmusic_bridge.py`: optional public Music API discovery using a project-isolated Python venv.
+- `src/art.rs`: verified image URLs, local embedded cover frames and cached truecolor terminal pixels.
+- `src/visualizer.rs`: transient speaker-monitor PCM capture, Goertzel analysis and 16-band visual spectrum.
 - `src/player.rs`: native MPD TCP protocol, mpv child management and IPC playback-position lookup; one active playback engine at a time.
 - `src/seek.rs`: timestamp parsing, bounded seek targets, mouse progress geometry.
 - `src/lyric_offset.rs`: input validation, signed offsets, and pure Tap Sync cue calculation from current player time and lyric timestamp.
@@ -71,3 +75,21 @@ instead of pausing. The p key toggles playback from the same Now Playing
 view without leaving cue mode, using the MPD/mpv playback coordinator.
 The normal transport controls remain available outside that mode.
 The TUI renders mode-specific key hints to prevent ambiguity.
+
+
+## Playlist import
+
+Import uses one SQLite transaction and never changes existing titles,
+tags or media identity. The playlist_order table maintains snapshot
+ordering separately from collection membership. Preview works on
+a worker thread. Explicit sequential background downloads send
+per-item status to the UI, which owns all SQLite writes.
+
+
+## v0.5 persistence and privacy
+
+The SQLite catalog stores persistent queue entries, explicit preferences,
+and local listening/quick-skip counts without cloud ranking. Artwork
+is cached in the private app data directory. Audio spectrum captures
+PCM from the playback sink monitor (which can include other applications);
+no microphone access or saved audio samples are involved.

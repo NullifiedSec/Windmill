@@ -7,6 +7,12 @@
 - [x] CLI and deterministic tag ranking exposed in a For You TUI.
 - [x] Ratatui Library, Discover, Collections, For You and Now Playing views.
 - [x] Public YouTube search and manual save to catalog.
+- [x] Public playlist preview, selective collection import and batch audio/video download.
+- [x] Persistent MPD/mpv play queue with auto-next, reorder, shuffle and repeat.
+- [x] Dedicated public YouTube Music song/album/artist/playlist discovery.
+- [x] Cached truecolor artwork from thumbnails and local embedded covers.
+- [x] Real audio-reactive output sink spectrum without microphone capture.
+- [x] Local ratings, listen/skip counts and explainable recommendations.
 - [x] Explicit yt-dlp audio/video downloads with background worker.
 - [x] Native MPD status/control and local library playback; mpv with IPC time-position.
 - [x] Local .lrc synchronized lyrics, private LRCLIB cache, manual correction, plain fallback and enhanced LRC word highlighting.
@@ -19,12 +25,12 @@
 
 ## Next vertical slices
 
-1. **Playback reliability:** coordinated queues, stop/pause, playlist integration, resume, audible playback tests.
-2. **YouTube Music:** artist, track, album and playlist search, source metadata and identifiers.
+1. **Playback reliability:** resume, queue failure handling, and audible real-device tests.
+2. **YouTube Music:** metadata depth, upstream resilience and alternative providers.
 3. **Downloader:** progress, cancellation, resuming, file naming, codecs, live download validation.
-4. **Rich lyrics/artwork:** cover rendering, manual result choice and title corrections, broader word-timed formats.
+4. **Rich lyrics/artwork:** manual source correction and lyric/art result choice.
 5. **Media imports:** recursive scan, file monitoring, MPD library reconciliation and custom virtual groups.
-6. **Recommend:** richer tag weights, negative feedback, diversity and exploration.
+6. **Recommend:** diversity and exploration.
 7. **Hardening:** SQLite migrations, permissions, portability and error-reporting integration tests.
 
 Do not call the project finished until full playback, download and source integration are verified.

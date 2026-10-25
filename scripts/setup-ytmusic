@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+python3 -m venv "$repo/.tools/ytmusic"
+"$repo/.tools/ytmusic/bin/python" -m pip install --disable-pip-version-check 'ytmusicapi>=1.12,<2'
+printf 'YTMusic ready: %s\n' "$repo/.tools/ytmusic/bin/python"

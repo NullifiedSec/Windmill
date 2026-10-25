@@ -2,25 +2,26 @@
 
 **Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Current status: v0.3.4 — playable Tap Sync controls and easy seeking
+## Current status: v0.5.0 — playlist import, queue, YouTube Music, artwork, spectrum and local recommendations
 
-The Rust terminal interface has five working views:
+The Rust terminal interface has six working views:
 
 - **Library:** saved media, source information, offline availability, user tags.
-- **Discover:** public YouTube search through yt-dlp, performed in a worker thread.
+- **Discover:** public YouTube discovery, dedicated YouTube Music search (songs/albums/artists/playlists) and selectable public playlist downloads.
 - **Collections:** any media entry can belong to arbitrarily many user-named collections.
-- **For You:** transparent tag-matching ranks, plus editable tag filters.
-- **Now Playing:** centered synchronized lyrics, live LRCLIB lookup and offline cache, playback progress, enhanced LRC highlighting and persistent timing correction.
+- **For You:** explainable local ranking from tags, likes/dislikes, listening history and quick skips.
+- **Now Playing:** synchronized lyrics, Tap Sync, offline lyric cache, progress, cached truecolor artwork and real audio-reactive output spectrum.
+- **Queue:** persistent MPD/mpv song queue with continuous playback, reorder, shuffle and repeat.
 - **MPRIS:** exposes Windmill to desktop media keys/playerctl, regardless of playback engine.
 
 The CLI and TUI support user-initiated offline audio/video downloads. Downloaded files are linked to their original media entry as assets instead of duplicating it.
 
-**Not finished:** no dedicated YouTube Music browsing backend, rich cover art, unified queue, or persistent download-progress dashboard. Actual downloading and audible playback still need end-to-end testing.
+**Not finished:** resumable/cancellable batch jobs, local media scanning, more robust queue error recovery, and fully audible output-device testing. YouTube Music lookup uses an optional isolated public API bridge.
 
 ## Run on the development workstation
 
 ~~~sh
-cd ~/Documents/windmill
+cd ~/Documents/windmill-expansion
 ./scripts/dev
 ~~~
 
@@ -36,9 +37,21 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 
 | Key | Action |
 |---|---|
-| `1`–`5`, `Tab`, `Shift+Tab` | Switch between five views |
+| `1`–`6`, `Tab`, `Shift+Tab` | Switch between six views |
 | `j` / `k`, arrows | Navigate |
 | `/` | Search public YouTube |
+| `P` | Preview a public playlist (Discover/Collections) |
+| `Y` | Search public YouTube Music (songs, albums, artists, playlists) |
+| `6` | Open persistent Queue tab |
+| `e` | Enqueue current media |
+| `Q` | In Collections, replace queue with the selected collection |
+| `n` / `b` | Next / previous queued track |
+| `<` / `>` | Move selected Queue entry up / down |
+| `S` / `R` | Shuffle queue / toggle repeat |
+| `+` / `-` / `=` | Like / dislike / reset saved-song rating |
+| `a` / `A` | Toggle one / select all playlist tracks in preview |
+| `I` | Import selected playlist tracks into a Windmill collection |
+| `B` / `V` | Explicit batch download of selected audio / video |
 | `p` | Play using mpv, prefer a downloaded local asset |
 | `m` | Play a local MPD-library file via MPD (Library) |
 | `s` | Save discovered media to catalog |
@@ -64,7 +77,7 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 | `o` | Set exact signed lyrics offset (e.g. `+12.5` or `-00:03.250`) |
 | `[` / `]` | Lyrics earlier/later in 250 ms steps (Now Playing) |
 | `0` | Reset lyric offset (Now Playing) |
-| `j/k`, Enter | Browse lyric lines and seek to selected timed line (Now Playing) |
+| `j/k`, `Enter` | Browse lyric lines and seek to selected timed line (Now Playing) |
 | `a` / `L` | Auto-follow / refresh LRCLIB lookup (Now Playing) |
 
 MPD must be running (`systemctl --user start mpd.service`). The configured MPD library root is `~/Music`. Files outside MPD's music directory remain playable using mpv.
@@ -127,7 +140,7 @@ playerctl -p windmill volume 0.5
 playerctl -p windmill metadata
 ~~~
 
-No extra root packages were needed on the development machine. The bus name only exists **while Windmill TUI is running**; headless control is future work. Loop/shuffle commands and global queues are not yet implemented. With several players installed, specify `-p windmill`.
+No extra root packages were needed on the development machine. The bus name only exists **while Windmill TUI is running**; headless control is future work. Queue navigation and shuffle/repeat are supported in Windmill. With multiple media players installed, specify `-p windmill`.
 
 See [MPRIS integration guide](docs/MPRIS.md).
 
@@ -161,3 +174,27 @@ cargo clippy --all-targets --locked -- -D warnings
 See [lyrics](docs/LYRICS.md), [architecture](docs/ARCHITECTURE.md), [roadmap](docs/ROADMAP.md), [user MPD setup](docs/MPD-SETUP.md), and [upstream references](docs/UPSTREAM.md).
 
 No Google login is required for public discovery, but online activity is **not anonymous**. Downloads depend on provider availability and should only be used where permitted. Windmill never scrapes or downloads automatically on import.
+
+
+## Public playlists
+
+From Discover, press `P` to preview a public YouTube playlist.
+Select entries with `a`/`A` and import with `I` or explicitly
+download with `B`/`V`. Nothing downloads during preview/import.
+The CLI supports `windmill playlist preview/import/download`.
+See [playlist guide](docs/PLAYLISTS.md).
+
+
+## v0.5 expansion
+
+Run `./scripts/setup-ytmusic` in the expansion worktree to install the
+optional YouTube Music dependency into its own private Python venv.
+Press `Y` in Discover, search `songs:Counting Stars` or `albums:Gorillaz`,
+and press Enter to browse an album or artist.
+
+The Queue tab (`6`) enables continuous MPD/mpv playback. Artwork is cached
+and drawn with real terminal pixels; the spectrum processes PCM from the
+default output sink monitor, not the microphone. Rate saved songs with
+`+`, `-` or `=` to influence purely local recommendations.
+
+See [full expansion guide](docs/EXPANSION.md).
