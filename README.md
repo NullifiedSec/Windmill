@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/windmill.png" alt="Windmill logo" width="220">
+  <img src="assets/windmill-banner.png" alt="Windmill — terminal media center banner" width="900">
 </p>
 
 # Windmill
