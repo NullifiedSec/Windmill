@@ -1,6 +1,6 @@
 [package]
 name = "windmill"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 description = "Local-first personal media center"
@@ -14,5 +14,6 @@ sha2 = "0.10"
 zbus = { version = "5.12", features = ["blocking"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 
 [dev-dependencies]

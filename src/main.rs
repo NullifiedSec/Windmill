@@ -27,7 +27,7 @@ fn data_dir() -> Result<PathBuf> {
 }
 fn usage() {
     println!(
-        "Windmill 0.5.1 — local-first media center\n\
+        "Windmill 0.6.0 — local-first media center\n\
     ui | tui                  # launch terminal media center (default)\n\
     add <path-or-url> <title> <creator>\n\
     list | tag <id> <tag> | untag <id> <tag>\n\
@@ -125,8 +125,9 @@ fn run() -> Result<()> {
             println!("{} | {} tracks | {}", pl.title, pl.entries.len(), pl.url);
             for (i, entry) in pl.entries.iter().enumerate() {
                 println!(
-                    "{:>3}. {} — {} | {}",
+                    "{:>3}. [{}] {} — {} | {}",
                     i + 1,
+                    youtube::duration_label(entry.duration_seconds),
                     entry.title,
                     entry.creator,
                     entry.url

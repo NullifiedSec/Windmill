@@ -109,3 +109,34 @@ The parser can insert a blank trailing lyric timestamp at the provider's
 duration. Playback and lyric durations contribute only to the visual
 padding/virtual tail calculations; the original file and true playback
 duration are never changed.
+
+
+## v0.6 native graphics and spectrum
+
+Video durations flow from yt-dlp flat metadata, playlists and optional
+YouTube Music result duration fields. Values missing upstream are shown
+as unknown, not synthesized.
+
+Artwork is fetched and privately cached by source as its real JPEG/
+local embedded image. A terminal Picker probes Kitty, Sixel or iTerm2
+support once, before terminal events begin; the cached image is
+decoded and protocol-encoded on a worker thread. The UI renders a
+ratatui-image widget rather than unicode half-block pixels.
+
+CAVA, when present, receives the default PulseAudio/PipeWire output
+sink monitor and does all frequency analysis and smoothing. Windmill
+reads its configured 16-byte mono raw 8-bit frames through a bounded
+channel (stale frames are dropped), and draws multilevel vertical bars.
+The CAVA process and temporary config are cleaned up when playback
+ends. Missing CAVA is a graceful, explicit optional feature failure.
+
+
+## Panels and enhanced keyboard reporting
+
+The terminal guard pushes Crossterm keyboard enhancement flags including
+Kitty/CSI-u all-key reporting before accepting input, and pops the flags
+on exit. Modified Tab keys navigate tabs, while unmodified digits toggle
+visibility. Now Playing uses six individually controlled panels; other
+views independently collapse list/details areas. Visibility is per-tab and stays
+session-local and does not change SQLite or playback. When the CAVA
+panel is hidden, capture is stopped until re-enabled.

@@ -19,18 +19,21 @@ def main():
         root=pathlib.Path(tmp)
         bin_dir=root/"bin";bin_dir.mkdir()
         pactl=bin_dir/"pactl";pactl.write_text("#!/bin/sh\necho fixture_sink\n");pactl.chmod(0o755)
-        parec=bin_dir/"parec";parec.write_text("""#!/usr/bin/env python3
-import math,sys,time
-assert any("fixture_sink.monitor" in a for a in sys.argv)
-frame=bytearray()
-for j in range(2048):
-    x=int(16000*math.sin(2*math.pi*450*j/22050))
-    frame+=x.to_bytes(2,"little",signed=True)
-for i in range(70):
+        cava=bin_dir/"cava"
+        cava.write_text("""#!/usr/bin/env python3
+import pathlib,sys,time
+assert "-p" in sys.argv
+config=pathlib.Path(sys.argv[sys.argv.index("-p")+1]).read_text()
+assert "fixture_sink.monitor" in config
+assert "method = raw" in config
+assert "bit_format = 8" in config
+frame=bytes([255,210,180,125,90,60,30,10,5,10,30,60,90,125,180,210])
+for i in range(100):
     sys.stdout.buffer.write(frame)
     sys.stdout.buffer.flush()
-    time.sleep(.025)
-""");parec.chmod(0o755)
+    time.sleep(.023)
+""")
+        cava.chmod(0o755)
         mpv=bin_dir/"mpv";mpv.write_text('#!/bin/sh\nexec /usr/bin/mpv --vo=null --ao=null "$@"\n');mpv.chmod(0o755)
         wav=root/"song.wav"
         subprocess.run(["ffmpeg","-v","error","-f","lavfi","-i",
@@ -39,7 +42,7 @@ for i in range(70):
             "WINDMILL_DATA_DIR":str(root/"data"),
             "WINDMILL_MPD_ADDR":"127.0.0.1:0",
             "PATH":str(bin_dir)+":"+os.environ.get("PATH","/usr/bin"),
-            "TERM":"xterm-256color"}
+            "TERM":"xterm-256color","WINDMILL_DISABLE_ARTWORK":"1"}
         env.pop("WINDMILL_DISABLE_VISUALIZER",None)
         result=subprocess.run([str(BIN),"add",str(wav),"Viz Fixture","Example"],
             env=env,capture_output=True,text=True)
@@ -54,10 +57,10 @@ for i in range(70):
             os.write(master,b"p")
             capture(master,proc,out,1.4)
             assert b"Output spectrum" in out,"Real PCM spectrum panel not rendered"
-            assert b"\xe2\x96\x88" in out,"Audio spectrum contains no active bars"
+            assert any(char.encode() in out for char in ("█","▇","▆","▅")), "No CAVA bars rendered"
             os.write(master,b"q")
             assert proc.wait(timeout=5)==0
-            print("PASS: non-microphone fake PCM samples create audio-reactive spectrum bars in the real TUI")
+            print("PASS: fake CAVA 8-bit raw frequency frames rendered in the TUI without real audio capture")
         finally:
             if proc.poll() is None:proc.terminate();proc.wait(timeout=5)
             os.close(master)

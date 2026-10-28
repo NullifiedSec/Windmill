@@ -22,6 +22,7 @@ def song(item):
         "id": vid,
         "title": str(item.get("title") or "Untitled")[:200],
         "creator": artists(item)[:150],
+        "duration": item.get("duration_seconds") or item.get("duration"),
         "url": "https://www.youtube.com/watch?v=" + vid,
     }
 

@@ -63,6 +63,24 @@ fn parse_items(json: &str) -> Result<Vec<MusicItem>> {
                 title: title.clone(),
                 creator: creator.clone(),
                 url: url.clone(),
+                duration_seconds: r
+                    .get("duration")
+                    .and_then(|v| {
+                        if let Some(seconds) = v.as_u64() {
+                            return Some(seconds);
+                        }
+                        let input = v.as_str()?;
+                        let mut seconds = 0u64;
+                        for part in input.split(':') {
+                            let next = part.parse::<u64>().ok()?;
+                            if next >= 60 && input.contains(':') {
+                                return None;
+                            }
+                            seconds = seconds.checked_mul(60)?.checked_add(next)?;
+                        }
+                        (seconds > 0).then_some(seconds)
+                    })
+                    .filter(|n| *n < 86400),
             });
             Some(MusicItem {
                 kind: kind.into(),

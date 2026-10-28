@@ -11,7 +11,10 @@
 - [x] Persistent MPD/mpv play queue with auto-next, reorder, shuffle and repeat.
 - [x] Dedicated public YouTube Music song/album/artist/playlist discovery.
 - [x] Cached truecolor artwork from thumbnails and local embedded covers.
+- [x] Replace character-cell cover renderer with terminal-native Kitty/Sixel/iTerm2 protocol imaging.
 - [x] Real audio-reactive output sink spectrum without microphone capture.
+- [x] Switch to CAVA raw backend for faster, smoother spectrum animation.
+- [x] Show provider-supplied video durations before user starts a download.
 - [x] Local ratings, listen/skip counts and explainable recommendations.
 - [x] Explicit yt-dlp audio/video downloads with background worker.
 - [x] Native MPD status/control and local library playback; mpv with IPC time-position.

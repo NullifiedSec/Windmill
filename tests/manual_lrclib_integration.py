@@ -70,7 +70,7 @@ def main():
         curl.chmod(0o755)
         env={**os.environ,"WINDMILL_DATA_DIR":str(root/"data"),
              "WINDMILL_MPD_ADDR":"127.0.0.1:0",
-             "WINDMILL_DISABLE_VISUALIZER":"1",
+             "WINDMILL_DISABLE_VISUALIZER":"1","WINDMILL_DISABLE_ARTWORK":"1",
              "PATH":str(bin_dir)+":"+os.environ.get("PATH","/usr/bin"),
              "TERM":"xterm-256color"}
         add=subprocess.run([str(BIN),"add",str(media),"Other title","Other artist"],

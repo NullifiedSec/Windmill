@@ -1,10 +1,5 @@
 //! Offline album art rendering as true-color half-block terminal cells.
 //! Only canonical validated YouTube video IDs can trigger thumbnail fetches.
-use image::{DynamicImage, imageops::FilterType};
-use ratatui::{
-    style::{Color, Style},
-    text::{Line, Span},
-};
 use sha2::{Digest, Sha256};
 use std::{
     error::Error,
@@ -34,30 +29,6 @@ pub fn video_id(source: &str) -> Option<&str> {
         None
     }
 }
-pub fn render(img: &DynamicImage, columns: u32, rows: u32) -> Vec<Line<'static>> {
-    let columns = columns.clamp(2, 60);
-    let rows = rows.clamp(1, 24);
-    let scaled = img
-        .resize_exact(columns, rows * 2, FilterType::Triangle)
-        .to_rgb8();
-    (0..rows)
-        .map(|row| {
-            let spans = (0..columns)
-                .map(|col| {
-                    let top = scaled.get_pixel(col, row * 2).0;
-                    let bottom = scaled.get_pixel(col, row * 2 + 1).0;
-                    Span::styled(
-                        "▀",
-                        Style::default()
-                            .fg(Color::Rgb(top[0], top[1], top[2]))
-                            .bg(Color::Rgb(bottom[0], bottom[1], bottom[2])),
-                    )
-                })
-                .collect::<Vec<_>>();
-            Line::from(spans)
-        })
-        .collect()
-}
 fn art_path(data: &Path, source: &str) -> PathBuf {
     let key = hex_sha(source);
     data.join("art").join(format!("{key}.jpg"))
@@ -66,7 +37,7 @@ fn hex_sha(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 /// Best-effort fetch. No album artwork is downloaded when merely browsing.
-pub fn get(source: &str, data: &Path) -> Result<Option<Vec<Line<'static>>>> {
+pub fn get(source: &str, data: &Path) -> Result<Option<PathBuf>> {
     let path = art_path(data, source);
     if !path.is_file() {
         fs::create_dir_all(data.join("art"))?;
@@ -120,7 +91,8 @@ pub fn get(source: &str, data: &Path) -> Result<Option<Vec<Line<'static>>>> {
     if bytes.len() > 4_194_304 {
         return Ok(None);
     }
-    Ok(Some(render(&image::load_from_memory(&bytes)?, 24, 8)))
+    image::load_from_memory(&bytes)?;
+    Ok(Some(art_path(data, source)))
 }
 #[cfg(test)]
 mod tests {
@@ -131,10 +103,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = "https://www.youtube.com/watch?v=HyHNuVaZJ-k";
         let first = get(source, temp.path()).unwrap().unwrap();
-        assert_eq!(first.len(), 8);
-        assert!(art_path(temp.path(), source).is_file());
+        assert!(first.is_file());
         let from_cache = get(source, temp.path()).unwrap().unwrap();
-        assert_eq!(from_cache.len(), first.len());
+        assert_eq!(from_cache, first);
     }
     #[test]
     fn reject_untrusted_sources() {
@@ -150,12 +121,5 @@ mod tests {
         ] {
             assert_eq!(video_id(url), None)
         }
-    }
-    #[test]
-    fn half_block_renders_expected_number_of_cells() {
-        let img = DynamicImage::new_rgb8(10, 20);
-        let lines = render(&img, 28, 8);
-        assert_eq!(lines.len(), 8);
-        assert!(lines.iter().all(|l| l.spans.len() == 28));
     }
 }

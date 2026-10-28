@@ -541,12 +541,14 @@ mod tests {
             title: "A".into(),
             creator: "X".into(),
             url: "https://www.youtube.com/watch?v=HyHNuVaZJ-k".into(),
+            duration_seconds: None,
         };
         let b = crate::youtube::Video {
             id: "abcdefABC_1".into(),
             title: "B".into(),
             creator: "Y".into(),
             url: "https://www.youtube.com/watch?v=abcdefABC_1".into(),
+            duration_seconds: None,
         };
         assert_eq!(
             s.import_playlist("My Mix", &[b.clone(), a.clone()])

@@ -25,7 +25,7 @@ def main():
         wrapper.write_text('#!/bin/sh\nexec /usr/bin/mpv --vo=null --ao=null "$@"\n')
         wrapper.chmod(0o755)
         env={**os.environ,"WINDMILL_DATA_DIR":str(root/"profile"),
-             "WINDMILL_MPD_ADDR":"127.0.0.1:0","WINDMILL_DISABLE_VISUALIZER":"1",
+             "WINDMILL_MPD_ADDR":"127.0.0.1:0","WINDMILL_DISABLE_VISUALIZER":"1","WINDMILL_DISABLE_ARTWORK":"1",
              "PATH":str(path)+":"+os.environ.get("PATH","/usr/bin"),
              "TERM":"xterm-256color"}
         for i,duration in [(1,2),(2,10)]:
@@ -42,15 +42,16 @@ def main():
         os.close(slave);output=bytearray()
         try:
             capture(master,tui,output,.65)
-            os.write(master,b"6")
+            for _ in range(5):
+                os.write(master,b"\x1b[9;5u")  # Ctrl+Tab CSI-u
+                capture(master,tui,output,.22)
             capture(master,tui,output,.35)
-            assert b"Track 1" in output and b"Track 2" in output
+            assert b"Queue controls" in output and b"Track 1" in output, "Ctrl+Tab did not enter Queue"
             os.write(master,b"\r")
             capture(master,tui,output,.55)
             assert b"Track 1" in output
             # First file is two seconds; automatic advance must play second.
             capture(master,tui,output,2.5)
-            assert b"Track 2" in output
             title=run(env,"playerctl","-p","windmill","metadata","--format","{{title}}").strip()
             assert title=="Track 2",f"Queue did not auto-advance; actual title={title!r}"
             os.write(master,b"x")

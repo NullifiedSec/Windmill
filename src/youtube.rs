@@ -11,6 +11,7 @@ pub struct Video {
     pub title: String,
     pub creator: String,
     pub url: String,
+    pub duration_seconds: Option<u64>,
 }
 
 fn safe_id(id: &str) -> bool {
@@ -50,11 +51,26 @@ pub fn parse_results(json: &str) -> Result<Vec<Video>> {
                 title,
                 creator,
                 url: format!("https://www.youtube.com/watch?v={id}"),
+                duration_seconds: entry
+                    .get("duration")
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n > 0 && *n < 86400),
             })
         })
         .collect())
 }
 
+pub fn duration_label(duration: Option<u64>) -> String {
+    duration
+        .map(|t| {
+            if t >= 3600 {
+                format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
+            } else {
+                format!("{}:{:02}", t / 60, t % 60)
+            }
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
 pub fn search(query: &str) -> Result<Vec<Video>> {
     let query = query.trim();
     if query.is_empty() {
@@ -98,6 +114,14 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].url, "https://www.youtube.com/watch?v=HyHNuVaZJ-k");
         assert_eq!(hits[0].title, "Feel Good Inc.");
+    }
+    #[test]
+    fn durations_are_read_from_flat_metadata() {
+        let sample = r#"{"entries":[{"id":"HyHNuVaZJ-k","duration":247,"title":"Song"},{"id":"abcdefABC_1","duration":null}]}"#;
+        let got = parse_results(sample).unwrap();
+        assert_eq!(got[0].duration_seconds, Some(247));
+        assert_eq!(duration_label(got[0].duration_seconds), "4:07");
+        assert_eq!(duration_label(got[1].duration_seconds), "unknown");
     }
     #[test]
     fn malformed_feed_is_rejected() {

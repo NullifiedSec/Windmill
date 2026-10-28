@@ -99,7 +99,7 @@ def main():
             else:
                 raise RuntimeError("MPD did not start.")
             env = dict(
-                os.environ, WINDMILL_DISABLE_VISUALIZER="1", WINDMILL_DATA_DIR=str(root / "windmill"),
+                os.environ, WINDMILL_DISABLE_VISUALIZER="1", WINDMILL_DISABLE_ARTWORK="1", WINDMILL_DATA_DIR=str(root / "windmill"),
                 WINDMILL_MUSIC_ROOT=str(music),
                 WINDMILL_MPD_ADDR=f"127.0.0.1:{port}", TERM="xterm-256color",
                 PATH=f"{bin_dir}:{os.environ.get('PATH', '/usr/bin')}",
@@ -172,7 +172,11 @@ def main():
             capture(master, tui, screen, .5)
             assert ctl("status") == "Stopped"
             # Switch from MPD to mpv while retaining the same Windmill bus name.
-            os.write(master, b"1p")  # Library tab, play selected media through mpv
+            # From Now Playing: Ctrl+Tab reaches Queue then Library (CSI-u).
+            for _ in range(2):
+                os.write(master,b"\x1b[9;5u")
+                capture(master,tui,screen,.22)
+            os.write(master,b"p")  # Play selected Library media via mpv
             capture(master,tui,screen,1.0)
             assert ctl("status") == "Playing", f"mpv state: {ctl('status')}"
             assert ctl("metadata","--format","{{title}}") == "Custom Windmill Title"

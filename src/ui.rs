@@ -16,7 +16,8 @@ use crate::{
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -29,6 +30,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
+use ratatui_image::{Image as TerminalImage, Resize, picker::Picker, protocol::Protocol};
 use std::{
     collections::BTreeSet,
     error::Error,
@@ -51,7 +53,7 @@ const ACCENT: Color = Color::Rgb(186, 216, 165);
 const MUTED: Color = Color::Rgb(150, 156, 171);
 const HIGHLIGHT: Color = Color::Rgb(246, 210, 143);
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Library,
     Discover,
@@ -158,7 +160,7 @@ struct MusicBrowseResponse {
 }
 struct ArtResponse {
     key: String,
-    result: std::result::Result<Option<Vec<Line<'static>>>, String>,
+    result: std::result::Result<Option<Protocol>, String>,
 }
 struct PlaylistResponse {
     url: String,
@@ -172,6 +174,7 @@ pub struct App {
     store: Store,
     tab: Tab,
     selected: [usize; 4],
+    visible_panels: [[bool; 6]; 6],
     queue_selected: usize,
     queue: Vec<(i64, Media)>,
     queue_active: Option<i64>,
@@ -226,7 +229,8 @@ pub struct App {
     lyric_rx: Receiver<LyricResponse>,
     duration_ms: Option<i64>,
     art_key: Option<String>,
-    art_lines: Vec<Line<'static>>,
+    art_protocol: Option<Protocol>,
+    art_picker: Picker,
     art_pending: bool,
     art_tx: Sender<ArtResponse>,
     art_rx: Receiver<ArtResponse>,
@@ -258,6 +262,7 @@ impl App {
             store,
             tab: Tab::Library,
             selected: [0; 4],
+            visible_panels: [[true; 6]; 6],
             queue_selected: 0,
             queue,
             queue_active: None,
@@ -312,7 +317,8 @@ impl App {
             lyric_rx,
             duration_ms: None,
             art_key: None,
-            art_lines: vec![],
+            art_protocol: None,
+            art_picker: Picker::halfblocks(),
             art_pending: false,
             art_tx,
             art_rx,
@@ -680,7 +686,7 @@ impl App {
                 })
         };
         let Some(source) = source else {
-            self.art_lines.clear();
+            self.art_protocol = None;
             self.art_key = None;
             self.art_pending = false;
             return;
@@ -689,7 +695,7 @@ impl App {
             return;
         }
         self.art_key = Some(source.clone());
-        self.art_lines.clear();
+        self.art_protocol = None;
         self.art_pending = true;
         let data = match crate::data_dir() {
             Ok(dir) => dir,
@@ -699,8 +705,21 @@ impl App {
             }
         };
         let tx = self.art_tx.clone();
+        let picker = self.art_picker.clone();
         std::thread::spawn(move || {
-            let result = art::get(&source, &data).map_err(|e| e.to_string());
+            let result = (|| -> std::result::Result<Option<Protocol>, String> {
+                let Some(path) = art::get(&source, &data).map_err(|e| e.to_string())? else {
+                    return Ok(None);
+                };
+                let image = image::ImageReader::open(path)
+                    .map_err(|e| e.to_string())?
+                    .decode()
+                    .map_err(|e| e.to_string())?;
+                let protocol = picker
+                    .new_protocol(image, ratatui::layout::Size::new(25, 10), Resize::Fit(None))
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(protocol))
+            })();
             let _ = tx.send(ArtResponse {
                 key: source,
                 result,
@@ -1724,11 +1743,55 @@ impl App {
             }
             KeyCode::Char('g') => self.prompt = Some(Prompt::JumpTime(String::new())),
             KeyCode::Char('z') => self.undo_seek(),
-            KeyCode::Tab => self.tab = Tab::from_index(self.tab.index() + 1),
-            KeyCode::BackTab => self.tab = Tab::from_index(self.tab.index() + 5),
-            KeyCode::Char('1'..='6') => {
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.tab = Tab::from_index(
+                    self.tab.index()
+                        + if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            5
+                        } else {
+                            1
+                        },
+                );
+            }
+            KeyCode::BackTab if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.tab = Tab::from_index(self.tab.index() + 5);
+            }
+            KeyCode::Char('1'..='6')
+                if !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+            {
                 if let KeyCode::Char(c) = key.code {
-                    self.tab = Tab::from_index((c as u8 - b'1') as usize)
+                    let idx = (c as u8 - b'1') as usize;
+                    if self.tab != Tab::Playing && idx > 1 {
+                        return false;
+                    }
+                    self.visible_panels[self.tab.index()][idx] =
+                        !self.visible_panels[self.tab.index()][idx];
+                    let panel = if self.tab == Tab::Playing {
+                        [
+                            "Artwork",
+                            "Spectrum",
+                            "Lyrics",
+                            "Track information",
+                            "Progress",
+                            "Controls",
+                        ][idx]
+                    } else if idx == 0 {
+                        "List"
+                    } else if idx == 1 {
+                        "Details"
+                    } else {
+                        "Now Playing panel"
+                    };
+                    self.status = format!(
+                        "{panel}: {}",
+                        if self.visible_panels[self.tab.index()][idx] {
+                            "shown"
+                        } else {
+                            "hidden"
+                        }
+                    );
                 }
             }
             KeyCode::Char('+')
@@ -1961,12 +2024,21 @@ impl App {
             && self.spectrum.is_none()
             && !self.spectrum_attempted
             && self.spectrum_enabled
+            && self.visible_panels[Tab::Playing.index()][1]
             && std::env::var_os("WINDMILL_DISABLE_VISUALIZER").is_none()
         {
             self.spectrum_attempted = true;
-            self.spectrum = visualizer::Spectrum::start().ok();
+            match visualizer::Spectrum::start() {
+                Ok(spectrum) => self.spectrum = Some(spectrum),
+                Err(e) => {
+                    self.spectrum = None;
+                    if self.tab == Tab::Playing {
+                        self.status = format!("CAVA visualizer unavailable: {e}");
+                    }
+                }
+            }
         }
-        if !active || !self.spectrum_enabled {
+        if !active || !self.spectrum_enabled || !self.visible_panels[Tab::Playing.index()][1] {
             self.spectrum = None;
             self.spectrum_bands = [0.; 16];
             self.spectrum_attempted = false;
@@ -2019,8 +2091,8 @@ impl App {
                 continue;
             }
             self.art_pending = false;
-            if let Ok(Some(lines)) = response.result {
-                self.art_lines = lines;
+            if let Ok(Some(protocol)) = response.result {
+                self.art_protocol = Some(protocol);
             }
         }
         while let Ok(response) = self.playlist_rx.try_recv() {
@@ -2183,7 +2255,15 @@ struct Screen;
 impl Screen {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(e) = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+            )
+        ) {
             let _ = disable_raw_mode();
             return Err(Box::new(e));
         }
@@ -2193,7 +2273,12 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
     }
 }
 
@@ -2210,6 +2295,11 @@ pub fn run(store: Store) -> Result<()> {
         }
     };
     let _screen = Screen::enter()?;
+    // Probe terminal capabilities before the TUI event loop; Ghostty's Kitty
+    // image support is preferred to character-cell approximation.
+    if std::env::var_os("WINDMILL_DISABLE_ARTWORK").is_none() {
+        app.art_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    }
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
     loop {
@@ -2225,7 +2315,7 @@ pub fn run(store: Store) -> Result<()> {
             }
         }
         terminal.draw(|f| draw(f, &app))?;
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(35))? {
             match event::read()? {
                 Event::Key(key) => {
                     if app.key(key) {
@@ -2264,8 +2354,34 @@ fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(tabs, layout[0]);
     let content = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .constraints(if app.tab == Tab::Playing {
+            if app.visible_panels[Tab::Playing.index()][2] {
+                [Constraint::Percentage(56), Constraint::Percentage(44)]
+            } else {
+                [Constraint::Percentage(100), Constraint::Length(0)]
+            }
+        } else {
+            match (
+                app.visible_panels[app.tab.index()][0],
+                app.visible_panels[app.tab.index()][1],
+            ) {
+                (true, true) => [Constraint::Percentage(56), Constraint::Percentage(44)],
+                (true, false) => [Constraint::Percentage(100), Constraint::Length(0)],
+                (false, true) => [Constraint::Length(0), Constraint::Percentage(100)],
+                (false, false) => [Constraint::Length(0), Constraint::Length(0)],
+            }
+        })
         .split(layout[1]);
+    if app.tab != Tab::Playing
+        && !app.visible_panels[app.tab.index()][0]
+        && !app.visible_panels[app.tab.index()][1]
+    {
+        frame.render_widget(
+            Paragraph::new("Both panels hidden. Press 1 or 2 to restore.")
+                .alignment(Alignment::Center),
+            layout[1],
+        );
+    }
     match app.tab {
         Tab::Library => draw_library(frame, app, content[0], content[1]),
         Tab::Discover => draw_discover(frame, app, content[0], content[1]),
@@ -2289,7 +2405,7 @@ fn draw(frame: &mut Frame, app: &App) {
     let bottom_hint = if app.tap_sync {
         "TAP SYNC: p play/pause · SPACE mark lyric · Esc cancel · ←/→ seek · q quit"
     } else {
-        "←/→ ±5s · Shift+←/→ ±30s · g jump · z undo · click progress · 1-6 tabs · Space/p pause · q quit"
+        "Ctrl+Tab / Ctrl+Shift+Tab = tabs · 1-6 = panels (Now Playing) · 1/2 = list/details · q quit"
     };
     frame.render_widget(
         Paragraph::new(bottom_hint)
@@ -2395,12 +2511,13 @@ fn draw_discover(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
             .enumerate()
             .map(|(index, video)| {
                 ListItem::new(format!(
-                    "{} {} — {}",
+                    "{} [{}] {} — {}",
                     if app.playlist_selected.contains(&index) {
                         "[x]"
                     } else {
                         "[ ]"
                     },
+                    youtube::duration_label(video.duration_seconds),
                     video.title,
                     video.creator
                 ))
@@ -2420,7 +2537,15 @@ fn draw_discover(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         );
         let current = app
             .selected_video()
-            .map(|v| format!("{}\\nBy: {}\\nSource: {}", v.title, v.creator, v.url))
+            .map(|v| {
+                format!(
+                    "{}\\nBy: {}\\nDuration: {}\\nSource: {}",
+                    v.title,
+                    v.creator,
+                    youtube::duration_label(v.duration_seconds),
+                    v.url
+                )
+            })
             .unwrap_or_default();
         let text = format!(
             "{}\\n\\nURL: {}\\nSelected: {} / {}\\n\\n            j/k navigate · a toggle · A select all\\n            I import selected into collection\\n            B download selected audio · V video\\n            P open another playlist · / normal search\\n            p play current · s save current\\n\\n            Nothing downloads until you press B or V.",
@@ -2440,7 +2565,14 @@ fn draw_discover(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     let items = app
         .found
         .iter()
-        .map(|v| ListItem::new(format!("{} — {}", v.title, v.creator)))
+        .map(|v| {
+            ListItem::new(format!(
+                "[{}] {} — {}",
+                youtube::duration_label(v.duration_seconds),
+                v.title,
+                v.creator
+            ))
+        })
         .collect();
     select_list(
         frame,
@@ -2458,9 +2590,10 @@ fn draw_discover(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     );
     let description = if let Some(v) = app.selected_video() {
         format!(
-            "{}\\n\\nBy: {}\\nVideo ID: {}\\n\\n{}\\n\\nStatus: {}\\n\\nPress p to play. s to save. d audio/v video.\\nPress P to preview a public playlist.",
+            "{}\\n\\nBy: {}\\nDuration: {}\\nVideo ID: {}\\n\\n{}\\n\\nStatus: {}\\n\\nPress p to play. s to save. d audio/v video.\\nPress P to preview a public playlist.",
             v.title,
             v.creator,
+            youtube::duration_label(v.duration_seconds),
             v.id,
             v.url,
             if app.store.has(&v.url).unwrap_or(false) {
@@ -2647,12 +2780,25 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     } else {
         "--:--".into()
     };
+    let flags = &app.visible_panels[Tab::Playing.index()];
     let info = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(7),
-            Constraint::Length(3),
-            Constraint::Length(7),
+            if flags[3] || flags[0] {
+                Constraint::Min(7)
+            } else {
+                Constraint::Length(0)
+            },
+            if flags[4] {
+                Constraint::Length(3)
+            } else {
+                Constraint::Length(0)
+            },
+            if flags[5] {
+                Constraint::Length(7)
+            } else {
+                Constraint::Length(0)
+            },
         ])
         .split(left);
     let details = vec![
@@ -2667,7 +2813,7 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         Line::raw(""),
         Line::from(format!("{minute:02}:{second:02} / {duration_label}")),
     ];
-    let has_spectrum = app.spectrum.is_some();
+    let has_spectrum = flags[1] && app.spectrum.is_some();
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -2675,25 +2821,32 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
             Constraint::Length(if has_spectrum { 6 } else { 0 }),
         ])
         .split(info[0]);
-    if !app.art_lines.is_empty() {
+    if flags[0] && app.art_protocol.is_some() {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+            .constraints(if flags[3] {
+                [Constraint::Percentage(44), Constraint::Percentage(56)]
+            } else {
+                [Constraint::Percentage(100), Constraint::Length(0)]
+            })
             .split(sections[0]);
-        frame.render_widget(
-            Paragraph::new(app.art_lines.clone())
-                .block(panel(" Cover "))
-                .alignment(Alignment::Center),
-            columns[0],
-        );
-        frame.render_widget(
-            Paragraph::new(details)
-                .block(panel(" Now Playing "))
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true }),
-            columns[1],
-        );
-    } else {
+        frame.render_widget(panel(" Cover "), columns[0]);
+        if let Some(protocol) = app.art_protocol.as_ref() {
+            frame.render_widget(
+                TerminalImage::new(protocol),
+                columns[0].inner(ratatui::layout::Margin::new(1, 1)),
+            );
+        }
+        if flags[3] {
+            frame.render_widget(
+                Paragraph::new(details)
+                    .block(panel(" Now Playing "))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true }),
+                columns[1],
+            );
+        }
+    } else if flags[3] {
         frame.render_widget(
             Paragraph::new(details)
                 .block(panel(" Now Playing "))
@@ -2707,7 +2860,8 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
         for row in (0..4).rev() {
             let mut spans = Vec::new();
             for (idx, value) in app.spectrum_bands.iter().enumerate() {
-                let brightness = (value * 4.).round() as usize;
+                let height = value.clamp(0., 1.) * 4.0;
+                let filled = ((height - row as f32) * 8.).clamp(0., 8.) as usize;
                 let color = if idx < 6 {
                     ACCENT
                 } else if idx < 11 {
@@ -2715,8 +2869,9 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
                 } else {
                     Color::Rgb(144, 178, 205)
                 };
+                let glyph = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][filled];
                 spans.push(Span::styled(
-                    if brightness > row { "█ " } else { "  " },
+                    format!("{glyph} "),
                     Style::default().fg(color),
                 ));
             }
@@ -2734,14 +2889,16 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
     } else {
         0.0
     };
-    frame.render_widget(
-        Gauge::default()
-            .block(panel(" Playback progress "))
-            .gauge_style(Style::default().fg(ACCENT))
-            .ratio(ratio)
-            .label(format!("{}%", (ratio * 100.0).round() as u8)),
-        info[1],
-    );
+    if flags[4] {
+        frame.render_widget(
+            Gauge::default()
+                .block(panel(" Playback progress "))
+                .gauge_style(Style::default().fg(ACCENT))
+                .ratio(ratio)
+                .label(format!("{}%", (ratio * 100.0).round() as u8)),
+            info[1],
+        );
+    }
     let controls = if app.tap_sync {
         let cue = match app.lyrics.as_ref() {
             Some(Document::Synced(lrc)) => lrc.lines().get(app.lyric_cursor).map(|line| {
@@ -2784,18 +2941,27 @@ fn draw_playing(frame: &mut Frame, app: &App, left: Rect, right: Rect) {
             "←/→ ±5s · g jump · z undo skip\ns Tap Sync · M paste LRCLIB · U auto\no offset · L refresh · V spectrum\np/Space pause · j/k lyrics · u undo tap\n{timeline}"
         )
     };
-    frame.render_widget(
-        Paragraph::new(controls)
-            .block(panel(if app.tap_sync {
-                " TAP SYNC · p play/pause, SPACE mark "
-            } else {
-                " Lyrics controls "
-            }))
-            .wrap(Wrap { trim: true })
-            .style(Style::default().fg(if app.tap_sync { HIGHLIGHT } else { MUTED })),
-        info[2],
-    );
-    draw_lyrics(frame, app, right, elapsed);
+    if flags[5] {
+        frame.render_widget(
+            Paragraph::new(controls)
+                .block(panel(if app.tap_sync {
+                    " TAP SYNC · p play/pause, SPACE mark "
+                } else {
+                    " Lyrics controls "
+                }))
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(if app.tap_sync { HIGHLIGHT } else { MUTED })),
+            info[2],
+        );
+    }
+    if flags[2] {
+        draw_lyrics(frame, app, right, elapsed);
+    } else if right.width > 0 && right.height > 0 {
+        frame.render_widget(
+            Paragraph::new("Lyrics hidden · press 3 to restore").alignment(Alignment::Center),
+            right,
+        );
+    }
 }
 fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
     let state = if app.lyric_pending {
@@ -2966,6 +3132,46 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect, elapsed_ms: i64) {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    #[test]
+    fn ctrl_tab_switches_views_and_numbers_toggle_panels() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut app = App::new(store).unwrap();
+        assert_eq!(app.tab, Tab::Library);
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.tab, Tab::Library, "plain Tab must not switch tabs");
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL));
+        assert_eq!(app.tab, Tab::Discover);
+        app.key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(app.tab, Tab::Library);
+        app.key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(app.tab, Tab::Queue);
+        app.key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert!(!app.visible_panels[Tab::Queue.index()][0]);
+        assert_eq!(app.tab, Tab::Queue);
+        app.key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert!(app.visible_panels[Tab::Queue.index()][0]);
+        app.tab = Tab::Playing;
+        for index in 0..6 {
+            let c = (b'1' + index as u8) as char;
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            assert!(!app.visible_panels[Tab::Playing.index()][index]);
+        }
+        let backend = TestBackend::new(110, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        for index in 0..6 {
+            let c = (b'1' + index as u8) as char;
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            assert!(app.visible_panels[Tab::Playing.index()][index]);
+        }
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+    }
     #[test]
     fn draws_all_tabs_without_media() {
         let store = Store::open(Path::new(":memory:")).unwrap();

@@ -2,7 +2,7 @@
 
 **Windmill is a local-first personal media center**, not a YouTube client. It manages its own media catalog, custom tags, collections, discovery, recommendations and playback state. MPD handles music-library audio; mpv handles video and other sources.
 
-## Current status: v0.5.1 — manual LRCLIB selection and duration-aware blank lyrics
+## Current status: v0.6.0 — video durations, native terminal image covers and CAVA visualization
 
 The Rust terminal interface has six working views:
 
@@ -62,7 +62,9 @@ The TUI starts by default and requires a real terminal. For the CLI run `windmil
 
 | Key | Action |
 |---|---|
-| `1`–`6`, `Tab`, `Shift+Tab` | Switch between six views |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab using CSI-u/Kitty keyboard protocol |
+| `1`–`6` (Now Playing) | Hide/show artwork, spectrum, lyrics, track info, progress, controls |
+| `1` / `2` (other tabs) | Hide/show list or details |
 | `j` / `k`, arrows | Navigate |
 | `/` | Search public YouTube |
 | `P` | Preview a public playlist (Discover/Collections) |
@@ -241,3 +243,62 @@ default output sink monitor, not the microphone. Rate saved songs with
 `+`, `-` or `=` to influence purely local recommendations.
 
 See [full expansion guide](docs/EXPANSION.md).
+
+
+## v0.6: Actual terminal graphics and fast CAVA spectrum
+
+- **Duration before download:** YouTube search and playlist preview show
+  each track's duration in `m:ss`/`h:mm:ss` when provided by YouTube.
+  In Discover the selected item's details also display its duration.
+  If a provider omits duration, Windmill explicitly says `unknown` instead
+  of inventing it. Nothing downloads during preview.
+- **Real album images:** Windmill uses `ratatui-image` and terminal graphics
+  protocols (Ghostty uses Kitty graphics) to display the cached cover as
+  an image rather than converting to unicode pixel mosaics. The encoding
+  happens in a worker thread, not on every redraw. Terminals without image
+  support may still use a fallback, and terminal graphics should be
+  visually inspected in your own terminal.
+- **Fast spectrum:** CAVA computes the frequency bars outside Windmill;
+  the TUI reads 8-bit heights and draws smooth 8-step vertical glyphs
+  with a 40 FPS CAVA source (terminal refresh is roughly 28 FPS). Unlike the older implementation, Windmill does not
+  recompute slow per-frequency FFT/Goertzel windows itself.
+
+Install CAVA once on Arch Linux (requires your own sudo approval):
+
+~~~sh
+sudo pacman -S cava
+~~~
+
+Then launch `windmill` and press `V` in Now Playing to enable or disable
+the CAVA spectrum. CAVA is optional: Windmill still plays music if it
+isn't installed, but the spectrum panel remains unavailable and a
+status message explains why. Audio capture is from the default speaker
+output monitor, which also reflects other apps playing on that sink,
+not the microphone. No audio is stored. For test or privacy use,
+set `WINDMILL_DISABLE_VISUALIZER=1`. A separate
+`WINDMILL_DISABLE_ARTWORK=1` disables the graphics protocol probe.
+
+
+## Panel visibility and enhanced keyboard navigation
+
+Windmill uses Kitty keyboard protocol / CSI-u (via Crossterm keyboard
+enhancements) in modern terminals such as Ghostty, allowing modified Tab
+combinations to reach the application. Press `Ctrl+Tab` for the next
+tab and `Ctrl+Shift+Tab` for the previous tab. Bare Tab does not switch
+tabs. Your terminal must pass the key combination to Windmill; customize
+terminal shortcuts if it intercepts Ctrl+Tab before applications see it.
+
+**In Now Playing**, number keys toggle the associated panel:
+
+- `1` artwork
+- `2` CAVA spectrum (hiding it also stops CAVA capture)
+- `3` lyrics
+- `4` track information
+- `5` playback progress bar
+- `6` lyric/Tap Sync control instructions
+
+In Library, Discover, Collections, For You and Queue, `1` toggles
+the item list and `2` the information/details pane. When one pane
+disappears, the other takes the available width. The toggles are independent per tab and session-local; next launch
+begins with everything visible.
+These shortcuts never pause playback or modify the queue/lyrics.

@@ -83,6 +83,10 @@ pub fn parse_playlist(json: &str, url: &str) -> Result<Playlist> {
                     .take(150)
                     .collect(),
                 url: format!("https://www.youtube.com/watch?v={id}"),
+                duration_seconds: item
+                    .get("duration")
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n > 0 && *n < 86400),
             })
         })
         .collect();

@@ -202,3 +202,5 @@ See [full expansion guide](docs/EXPANSION.md).
 
 2026-10-25 - feature/windmill-release-prep - Added Now Playing spectrum toggle and user-scoped release installer, preserving main-worktree history.
 2026-10-25 - manual LRCLIB URL selection, pinned by source, ID-based offline cache, sidecar override, and virtual blank intro/outro durations. Playback untouched.
+2026-10-25 - feature/fast-artwork-duration-cava - Surface yt-dlp video/playlist duration before download; replace block mosaic with worker-encoded ratatui-image graphics; use CAVA 8-bit output for smooth visualizers, preserving per-user playback data.
+2026-10-28 - feature/fast-artwork-duration-cava - Added CSI-u enhanced Ctrl+Tab tab navigation and digit-based collapsible panels; hiding CAVA stops its process; regression tests cover toggles and navigation.
