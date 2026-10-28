@@ -127,4 +127,15 @@ This is an early source-based release, not a universal packaged desktop app. Int
 
 ## License
 
-[MIT](LICENSE). Dependencies, audio/media tools, and third-party providers retain their own licenses and terms.
+**GNU GPL v3 or later** ([full license](LICENSE), SPDX: GPL-3.0-or-later).
+
+**Original author: Mashrur Rahman Rawnok (NullifiedSec)**.
+Please preserve the original attribution in [NOTICE](NOTICE) and applicable
+copyright notices when redistributing Windmill or GPL-covered derivatives.
+GPL also requires covered distributed derivatives to provide corresponding
+source code and identify modifications. Crediting Windmill visibly in an
+About page or README is appreciated, though the GPL does not always
+require a visible credit screen.
+
+Earlier published MIT versions remain usable under their original terms.
+Third-party dependencies retain their own licenses.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! The session-bus MPRIS facade for the whole Windmill media center.
 //! MPD and mpv are implementation details: only Windmill is exposed to playerctl.
 //! D-Bus handlers enqueue commands; all player mutations happen on the TUI thread.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! Per-recording lyric timing offsets. Positive offsets delay the displayed
 //! lyrics, e.g. +12.5 means a 12.5-second music-video intro.
 pub const MAX_ABS_OFFSET_MS: i64 = 3_600_000;

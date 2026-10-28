@@ -108,3 +108,12 @@ Before changing database migrations, back up the user's data. Changes should rem
 Open an issue for nontrivial features, use descriptive branches and small focused commits, document behavior changes, and add Rust or isolated integration coverage. Don't include recorded media, playback databases, OAuth cookies, API keys, private filesystem paths, or proprietary code. Follow [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 Related deeper docs: [architecture](ARCHITECTURE.md), [lyrics](LYRICS.md), [public playlists](PLAYLISTS.md), [MPD](MPD-SETUP.md), [MPRIS](MPRIS.md), and [roadmap](ROADMAP.md).
+
+
+## GPL licensing and attribution
+
+Windmill uses GPL-3.0-or-later. See [LICENSE](../LICENSE) for the
+unmodified official license and [NOTICE](../NOTICE) for original author
+attribution. Preserve applicable notices and record modifications in
+distributed derivatives. Previous Windmill releases issued under MIT
+retain those historical license grants.

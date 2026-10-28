@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! Pure timeline conversions shared by shortcuts, jump-to-time and mouse seek.
 /// An absolute input such as 1:23.5 or 83.5; no negative or NaN values.
 pub fn parse_time_ms(input: &str) -> Result<i64, &'static str> {

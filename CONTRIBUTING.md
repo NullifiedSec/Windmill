@@ -31,4 +31,7 @@ Include Windmill version/commit, OS and terminal, reproduction steps, expected v
 
 Be constructive and welcoming. Critique code, not people; harassment, discrimination and personal attacks are not welcome.
 
-By contributing, you agree your contributions are licensed under the project's MIT License.
+By contributing, you agree to license your contributions under
+GPL-3.0-or-later, retaining copyright in your own work unless otherwise
+agreed. Preserve original author notices and see [LICENSE](LICENSE)
+and [NOTICE](NOTICE).

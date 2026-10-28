@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! Public playlist metadata import, never implicit download or authentication.
 //! Limits entries so a malicious/huge playlist cannot allocate indefinitely.
 use crate::youtube::Video;

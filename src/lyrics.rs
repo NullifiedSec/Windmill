@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! Basic synchronized LRC lyrics, kept independent of playback engines.
 //! The timestamp used for comparisons is milliseconds. Positive [offset:...] delays lyrics.
 use std::str::FromStr;

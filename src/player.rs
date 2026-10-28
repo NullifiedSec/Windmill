@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! MPD control and mpv IPC, with playback state independent of the UI.
 use crate::store::Media;
 use serde_json::{Value, json};

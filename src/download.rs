@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! User-initiated yt-dlp downloads. Side effects run on a worker thread.
 use std::{
     error::Error,

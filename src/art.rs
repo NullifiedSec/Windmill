@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! Offline album art rendering as true-color half-block terminal cells.
 //! Only canonical validated YouTube video IDs can trigger thumbnail fetches.
 use sha2::{Digest, Sha256};

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! Shared lyrics acquisition: local .lrc > offline cache > user-initiated LRCLIB.
 //! No lyrics are bundled with Windmill. Never execute media metadata as shell code.
 use crate::lyrics::Lyrics;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! Public YouTube search via yt-dlp, with no account or cloud profile.
 //! The search process is run off the TUI event loop.
 use serde_json::Value;

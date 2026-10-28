@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Mashrur Rahman Rawnok (NullifiedSec)
 //! CAVA raw 8-bit spectrum reader. All FFT/smoothing is done by CAVA.
 //! Never record microphone or write raw PCM to disk.
 use std::{
