@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/windmill.png" alt="Windmill logo" width="220">
+</p>
+
 # Windmill
 
 **Your music. Your terminal. Your rules.**
